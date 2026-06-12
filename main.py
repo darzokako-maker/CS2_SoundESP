@@ -12,12 +12,12 @@ class Config:
     distance = 1300
 
 class Offsets: # 3.01.2024
-    dwEntityList = 0x17C1950
-    dwLocalPlayerPawn = 0x16C8F38
-    m_iTeamNum = 0x3BF
-    m_iHealth = 0x32C
-    m_vOldOrigin = 0x1224
-    m_hPlayerPawn = 0x7EC
+    dwEntityList = 0x24E76A0
+    dwLocalPlayerPawn = 0x2341698
+    m_iTeamNum = 0x3EB
+    m_iHealth = 0x34C
+    m_vOldOrigin = 0x1390
+    m_hPlayerPawn = 0x90C
 
 class Entity:
     def __init__(self, proc, pawn):
@@ -55,13 +55,13 @@ def main():
         for i in range(1,64):
             listEntry = pm.r_uint64(proc, EntityList + (8 * (i & 0x7FFF) >> 9) + 16)
             if listEntry == 0: continue   
-            entity = pm.r_uint64(proc, listEntry + 120 * (i & 0x1FF))
+            entity = pm.r_uint64(proc, listEntry + 112 * (i & 0x1FF))
             if entity == 0: continue                          
             entityCPawn = pm.r_uint(proc, entity + Offsets.m_hPlayerPawn)
             if entityCPawn == 0: continue   
             listEntry2  = pm.r_uint64(proc, EntityList + 0x8 * ((entityCPawn & 0x7FFF) >> 9) + 16)
             if listEntry2 == 0: continue 
-            entityPawn = pm.r_uint64(proc, listEntry2 + 120 * (entityCPawn & 0x1FF))
+            entityPawn = pm.r_uint64(proc, listEntry2 + 112 * (entityCPawn & 0x1FF))
             if entityPawn == 0: continue 
 
             player = Entity(proc, entityPawn)
