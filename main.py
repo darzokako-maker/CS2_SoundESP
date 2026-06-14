@@ -1,26 +1,23 @@
 import sys
 import time
-from math import sqrt, inf
+import math
 import ctypes
 from ctypes import wintypes
+import http.server
+import socketserver
+import threading
+import json
 
-# --- Windows Hafıza Okuma API Yapılandırması (pyMeow Alternatifi) ---
+# --- Windows Hafıza Okuma API Yapılandırması ---
 kernel32 = ctypes.windll.kernel32
 PROCESS_VM_READ = 0x0010
 PROCESS_QUERY_INFORMATION = 0x0400
 
 class MODULEENTRY32(ctypes.Structure):
     _fields_ = [
-        ("dwSize", wintypes.DWORD),
-        ("th32ModuleID", wintypes.DWORD),
-        ("th32ProcessID", wintypes.DWORD),
-        ("GlblcntUsage", wintypes.DWORD),
-        ("ProccntUsage", wintypes.DWORD),
-        ("modBaseAddr", ctypes.POINTER(ctypes.c_byte)),
-        ("modBaseSize", wintypes.DWORD),
-        ("hModule", wintypes.HANDLE),
-        ("szModule", ctypes.c_char * 256),
-        ("szExePath", ctypes.c_char * 260)
+        ("dwSize", wintypes.DWORD), ("th32ModuleID", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+        ("GlblcntUsage", wintypes.DWORD), ("ProccntUsage", wintypes.DWORD), ("modBaseAddr", ctypes.POINTER(ctypes.c_byte)),
+        ("modBaseSize", wintypes.DWORD), ("hModule", wintypes.HANDLE), ("szModule", ctypes.c_char * 256), ("szExePath", ctypes.c_char * 260)
     ]
 
 def get_process_id(process_name):
@@ -30,7 +27,6 @@ def get_process_id(process_name):
                     ("th32DefaultHeapID", ctypes.POINTER(wintypes.ULONG)), ("th32ModuleID", wintypes.DWORD),
                     ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
                     ("pcPriClassBase", wintypes.LONG), ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_char * 260)]
-    
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     pe = PROCESSENTRY32()
     pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
@@ -72,10 +68,7 @@ def read_vec3(handle, address):
         return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
     return {"x": 0, "y": 0, "z": 0}
 
-# --- Ofset Yapılandırması (2026 Dump) ---
-class Config:
-    distance = 1300
-
+# --- 2026 Ofsetleri ---
 class Offsets: 
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
@@ -83,54 +76,175 @@ class Offsets:
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
     m_hPlayerPawn = 0x90C          
+    dwCSGOInput = 0x2356240        
 
 class Entity:
     def __init__(self, handle, pawn):
         self.handle = handle
         self.pawn = pawn
-    
     @property
-    def team(self):
-        return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
-    
+    def team(self): return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
     @property
-    def health(self):
-        return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
+    def health(self): return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
+    @property
+    def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
 
-    @property
-    def position(self):
-        return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
+# Küresel Paylaşılan Veri Yapısı (Web sunucusu burayı okuyacak)
+radar_data = {"yaw": 0, "enemies": []}
 
-def distance(player, entity):
-    return sqrt((player["x"] - entity["x"])**2 + (player["y"] - entity["y"])**2 + (player["z"] - entity["z"])**2)
+class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format, *args): return # Konsolu HTTP istek loglarıyla kirletmemek için kapatıyoruz
+    
+    def do_GET(self):
+        if self.path == '/data':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(radar_data).encode('utf-8'))
+        elif self.path == '/' or self.path == '/index.html':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(HTML_RADAR_UI.encode('utf-8'))
+        else:
+            self.send_error(404)
+
+def run_web_server():
+    PORT = 8000
+    with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
+        print(f"[+] Web Radar Arayuzu Baslatildi: http://localhost:{PORT}")
+        httpd.serve_forever()
+
+# --- WEB ARAYÜZÜ (HTML5 & Canvas & JavaScript) ---
+HTML_RADAR_UI = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CS2 Web Radar</title>
+    <style>
+        body { margin: 0; background: #11141a; display: flex; justify-content: center; align-items: center; height: 100vh; font-family: sans-serif; overflow: hidden; }
+        #radarContainer { position: relative; }
+        canvas { background: #161a22; border-radius: 50%; border: 4px solid #242b35; box-shadow: 0 0 20px rgba(0,0,0,0.6); }
+        .info { position: absolute; top: -30px; left: 10px; color: #8a96a3; font-size: 14px; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="radarContainer">
+        <div class="info">CS2 WEB RADAR // LOCALHOST</div>
+        <canvas id="radar" width="600" height="600"></canvas>
+    </div>
+    <script>
+        const canvas = document.getElementById('radar');
+        const ctx = canvas.getContext('2d');
+        const center = canvas.width / 2;
+        const SCALE = 0.18; // Web görünümü için ideal mesafe ölçeği
+
+        function drawRadarGrid() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Radar Halkaları
+            ctx.strokeStyle = '#242b35';
+            ctx.lineWidth = 1;
+            for(let r = 100; r <= center; r += 100) {
+                ctx.beginPath();
+                ctx.arc(center, center, r, 0, 2 * Math.PI);
+                ctx.stroke();
+            }
+
+            // Radar Çapraz Çizgileri
+            ctx.beginPath();
+            ctx.moveTo(center, 0); ctx.lineTo(center, canvas.height);
+            ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
+            ctx.stroke();
+
+            // Merkez Oyuncu (Sen)
+            ctx.fillStyle = '#00ffcc';
+            ctx.beginPath();
+            ctx.moveTo(center, center - 8);
+            ctx.lineTo(center - 6, center + 6);
+            ctx.lineTo(center + 6, center + 6);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        async function updateRadar() {
+            try {
+                const response = await fetch('/data');
+                const data = await response.json();
+                
+                drawRadarGrid();
+                
+                const yawRad = (data.yaw * Math.PI) / 180;
+
+                data.enemies.forEach(enemy => {
+                    // Pozisyon farkları
+                    let dx = enemy.x;
+                    let dy = enemy.y;
+
+                    // Kendi bakış açımıza göre 2D rotasyon matrisi
+                    let rx = dx * Math.cos(-yawRad) - dy * Math.sin(-yawRad);
+                    let ry = dx * Math.sin(-yawRad) + dy * Math.cos(-yawRad);
+
+                    // Ekrana izdüşüm
+                    let screenX = center + (rx * SCALE);
+                    let screenY = center - (ry * SCALE);
+
+                    // Çember sınırları içinde tutma (Kırpma)
+                    let distFromCenter = Math.sqrt(Math.pow(screenX - center, 2) + Math.pow(screenY - center, 2));
+                    if (distFromCenter < center - 10) {
+                        ctx.fillStyle = `rgb(255, ${Math.floor(enemy.health * 2.55)}, 0)`; // Cana göre renklendirme (Kırmızı -> Sarı)
+                        ctx.beginPath();
+                        ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI);
+                        ctx.fill();
+                        ctx.strokeStyle = '#fff';
+                        ctx.lineWidth = 1;
+                        ctx.stroke();
+                    }
+                });
+            } catch (e) { }
+            setTimeout(updateRadar, 30); // 33 FPS güncelleme hızı
+        }
+        updateRadar();
+    </script>
+</body>
+</html>
+"""
 
 def main():
+    global radar_data
     pid = None
     while pid is None:
         pid = get_process_id("cs2.exe")
         if pid is None:
-            sys.stdout.write("\r[ Waiting ] CS2.exe bekleniyor... Lutfen oyunu baslatin. \x1b[K")
+            sys.stdout.write("\r[ Waiting ] CS2.exe bekleniyor... \x1b[K")
             sys.stdout.flush()
             time.sleep(1)
 
     handle = kernel32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
     base = get_module_base(pid, "client.dll")
 
-    print("\n[+] CS2 Basariyla Bulundu ve Yerel API ile Baglanildi!")
-    print("[+] Started CS2 Terminal ESP with updated 2026 offsets.")
-    print("--------------------------------------------------")
+    # Web sunucusunu ana döngüyü kilitlememesi için ayrı bir Thread (iş parçacığı) olarak başlatıyoruz
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+
+    print("[+] Hafiza tarama motoru aktif. Veriler web arayuzune aktariliyor.")
 
     while True:
         try:
             EntityList = read_memory(handle, base + Offsets.dwEntityList, ctypes.c_uint64)
             localPlayerPawnAddr = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
+            csgoInput = read_memory(handle, base + Offsets.dwCSGOInput, ctypes.c_uint64)
             
-            if not localPlayerPawnAddr:
-                time.sleep(0.5)
+            if not localPlayerPawnAddr or not csgoInput:
+                time.sleep(0.1)
                 continue
                 
             localPlayer = Entity(handle, localPlayerPawnAddr)
-            lowestDist = inf
+            local_pos = localPlayer.position
+            view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
+
+            temp_enemies = []
 
             for i in range(1, 64):
                 listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
@@ -147,25 +261,23 @@ def main():
                 player = Entity(handle, entityPawn)
 
                 if localPlayer.team != player.team and player.health > 0:
-                    local_pos = localPlayer.position
                     player_pos = player.position
-                    
-                    if local_pos["x"] == 0 and player_pos["x"] == 0:
-                        continue
-                        
-                    dist = distance(local_pos, player_pos)
-                    if dist < lowestDist:
-                        lowestDist = dist
+                    if player_pos["x"] == 0 and player_pos["y"] == 0: continue
 
-            if lowestDist < Config.distance:
-                duration = max(150, lowestDist / 2)
-                sys.stdout.write(f"\r[DUSMAN YAKINDA] En Yakin Dusman Mesafesi: {lowestDist:.2f} birim \x1b[K")
-                sys.stdout.flush()
-                time.sleep(duration / 2500)
-            else:
-                sys.stdout.write("\r[GUVENLI] Belirlenen mesafede dusman yok. \x1b[K")
-                sys.stdout.flush()
-                time.sleep(.5)
+                    # Sadece ham mesafe farklarını web arayüzüne paslıyoruz (Matematik tarayıcıda çözülecek)
+                    temp_enemies.append({
+                        "x": player_pos["x"] - local_pos["x"],
+                        "y": player_pos["y"] - local_pos["y"],
+                        "health": player_index := player.health
+                    })
+
+            # Küresel değişkeni güvenli bir şekilde güncelle
+            radar_data = {
+                "yaw": view_angles_y,
+                "enemies": temp_enemies
+            }
+            
+            time.sleep(0.015) # Hafıza okuma frekansı (~60Hz)
                 
         except Exception:
             time.sleep(0.1)
