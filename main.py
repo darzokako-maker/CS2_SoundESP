@@ -1,106 +1,150 @@
-"""
-External CS2 Terminal Distance ESP
-by im-razvan (Offsets updated from 2026 dump files)
-"""
-
 import sys
+import time
 from math import sqrt, inf
-from time import sleep
+import ctypes
+from ctypes import wintypes
 
-# Kütüphane Kontrolü: Derleme sonrası eksik bağımlılık senaryolarına karşı önlem
-try:
-    import pyMeow as pm
-except ImportError:
-    print("[-] HATA: 'pyMeow' kutuphanesi yuklenemedi veya eksik.")
-    print("Lutfen programi yonetici olarak calistirdiginizdan emin olun.")
-    input("\nKapatmak icin ENTER'a basin...")
-    sys.exit(1)
+# --- Windows Hafıza Okuma API Yapılandırması (pyMeow Alternatifi) ---
+kernel32 = ctypes.windll.kernel32
+PROCESS_VM_READ = 0x0010
+PROCESS_QUERY_INFORMATION = 0x0400
 
+class MODULEENTRY32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("th32ModuleID", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("GlblcntUsage", wintypes.DWORD),
+        ("ProccntUsage", wintypes.DWORD),
+        ("modBaseAddr", ctypes.POINTER(ctypes.c_byte)),
+        ("modBaseSize", wintypes.DWORD),
+        ("hModule", wintypes.HANDLE),
+        ("szModule", ctypes.c_char * 256),
+        ("szExePath", ctypes.c_char * 260)
+    ]
+
+def get_process_id(process_name):
+    TH32CS_SNAPPROCESS = 0x00000002
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.POINTER(wintypes.ULONG)), ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", wintypes.LONG), ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_char * 260)]
+    
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    pe = PROCESSENTRY32()
+    pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
+    if kernel32.Process32First(snapshot, ctypes.byref(pe)):
+        while kernel32.Process32Next(snapshot, ctypes.byref(pe)):
+            if pe.szExeFile.decode('utf-8').lower() == process_name.lower():
+                kernel32.CloseHandle(snapshot)
+                return pe.th32ProcessID
+    kernel32.CloseHandle(snapshot)
+    return None
+
+def get_module_base(pid, module_name):
+    TH32CS_SNAPMODULE = 0x00000008
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid)
+    me = MODULEENTRY32()
+    me.dwSize = ctypes.sizeof(MODULEENTRY32)
+    if kernel32.Module32First(snapshot, ctypes.byref(me)):
+        while kernel32.Module32Next(snapshot, ctypes.byref(me)):
+            if me.szModule.decode('utf-8').lower() == module_name.lower():
+                base_addr = ctypes.cast(me.modBaseAddr, ctypes.c_void_p).value
+                kernel32.CloseHandle(snapshot)
+                return base_addr
+    kernel32.CloseHandle(snapshot)
+    return None
+
+def read_memory(handle, address, c_type):
+    buffer = c_type()
+    bytes_read = ctypes.c_size_t()
+    if kernel32.ReadProcessMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), ctypes.sizeof(c_type), ctypes.byref(bytes_read)):
+        return buffer.value
+    return 0
+
+def read_vec3(handle, address):
+    class Vec3(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_float), ("y", ctypes.c_float), ("z", ctypes.c_float)]
+    buffer = Vec3()
+    bytes_read = ctypes.c_size_t()
+    if kernel32.ReadProcessMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), ctypes.sizeof(Vec3), ctypes.byref(bytes_read)):
+        return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
+    return {"x": 0, "y": 0, "z": 0}
+
+# --- Ofset Yapılandırması (2026 Dump) ---
 class Config:
     distance = 1300
 
 class Offsets: 
-    # 2026 Tarihli offsets.hpp Dosyasından Alınan Güncel Ana Adresler
-    dwEntityList = 0x24E76A0       #
-    dwLocalPlayerPawn = 0x2341698  #
-
-    # 2026 Tarihli client_dll.hpp Dosyasından Alınan Güncel Sınıf İçi Ofsetler
-    m_iTeamNum = 0x3EB             #
-    m_iHealth = 0x34C              #
-    m_vOldOrigin = 0x1390          #
-    m_hPlayerPawn = 0x90C          #
+    dwEntityList = 0x24E76A0       
+    dwLocalPlayerPawn = 0x2341698  
+    m_iTeamNum = 0x3EB             
+    m_iHealth = 0x34C              
+    m_vOldOrigin = 0x1390          
+    m_hPlayerPawn = 0x90C          
 
 class Entity:
-    def __init__(self, proc, pawn):
-        self.proc = proc
+    def __init__(self, handle, pawn):
+        self.handle = handle
         self.pawn = pawn
     
     @property
     def team(self):
-        try:
-            return pm.r_int(self.proc, self.pawn + Offsets.m_iTeamNum)
-        except:
-            return 0
+        return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
     
     @property
     def health(self):
-        try:
-            return pm.r_int(self.proc, self.pawn + Offsets.m_iHealth)
-        except:
-            return 0
+        return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
 
     @property
     def position(self):
-        try:
-            return pm.r_vec3(self.proc, self.pawn + Offsets.m_vOldOrigin)
-        except:
-            return {"x": 0, "y": 0, "z": 0}
+        return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
 
 def distance(player, entity):
     return sqrt((player["x"] - entity["x"])**2 + (player["y"] - entity["y"])**2 + (player["z"] - entity["z"])**2)
 
 def main():
-    proc = None
-    
-    # Oyun açılana kadar döngüde bekler, açılınca otomatik bağlanır
-    while proc is None:
-        try:
-            proc = pm.open_process("cs2.exe")
-            base = pm.get_module(proc, "client.dll")["base"]
-        except:
+    pid = None
+    while pid is None:
+        pid = get_process_id("cs2.exe")
+        if pid is None:
             sys.stdout.write("\r[ Waiting ] CS2.exe bekleniyor... Lutfen oyunu baslatin. \x1b[K")
             sys.stdout.flush()
-            sleep(1)
+            time.sleep(1)
 
-    print("\n[+] CS2 Basariyla Bulundu ve Baglanildi!")
+    handle = kernel32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
+    base = get_module_base(pid, "client.dll")
+
+    print("\n[+] CS2 Basariyla Bulundu ve Yerel API ile Baglanildi!")
     print("[+] Started CS2 Terminal ESP with updated 2026 offsets.")
     print("--------------------------------------------------")
 
     while True:
         try:
-            EntityList = pm.r_uint64(proc, base + Offsets.dwEntityList)
-            localPlayerPawnAddr = pm.r_uint64(proc, base + Offsets.dwLocalPlayerPawn)
+            EntityList = read_memory(handle, base + Offsets.dwEntityList, ctypes.c_uint64)
+            localPlayerPawnAddr = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
             
             if not localPlayerPawnAddr:
-                sleep(0.5)
+                time.sleep(0.5)
                 continue
                 
-            localPlayer = Entity(proc, localPlayerPawnAddr)
+            localPlayer = Entity(handle, localPlayerPawnAddr)
             lowestDist = inf
 
             for i in range(1, 64):
-                listEntry = pm.r_uint64(proc, EntityList + (8 * (i & 0x7FFF) >> 9) + 16)
+                listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
                 if listEntry == 0: continue   
-                entity = pm.r_uint64(proc, listEntry + 112 * (i & 0x1FF))
+                entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
                 if entity == 0: continue                          
-                entityCPawn = pm.r_uint(proc, entity + Offsets.m_hPlayerPawn)
+                entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
                 if entityCPawn == 0: continue   
-                listEntry2  = pm.r_uint64(proc, EntityList + 0x8 * ((entityCPawn & 0x7FFF) >> 9) + 16)
+                listEntry2  = read_memory(handle, EntityList + 0x8 * ((entityCPawn & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
                 if listEntry2 == 0: continue 
-                entityPawn = pm.r_uint64(proc, listEntry2 + 112 * (entityCPawn & 0x1FF))
+                entityPawn = read_memory(handle, listEntry2 + 112 * (entityCPawn & 0x1FF), ctypes.c_uint64)
                 if entityPawn == 0: continue 
 
-                player = Entity(proc, entityPawn)
+                player = Entity(handle, entityPawn)
 
                 if localPlayer.team != player.team and player.health > 0:
                     local_pos = localPlayer.position
@@ -113,23 +157,18 @@ def main():
                     if dist < lowestDist:
                         lowestDist = dist
 
-            # SES YERİNE TERMİNALE BASMA MANTIĞI (Projedeki Yapı Aynen Korundu)
             if lowestDist < Config.distance:
                 duration = max(150, lowestDist / 2)
-                
-                # \r imleci satırın başına çeker, \x1b[K ise eski satırdan kalan yazıları siler.
                 sys.stdout.write(f"\r[DUSMAN YAKINDA] En Yakin Dusman Mesafesi: {lowestDist:.2f} birim \x1b[K")
                 sys.stdout.flush()
-                
-                sleep(duration / 2500)
+                time.sleep(duration / 2500)
             else:
                 sys.stdout.write("\r[GUVENLI] Belirlenen mesafede dusman yok. \x1b[K")
                 sys.stdout.flush()
-                sleep(.5)
+                time.sleep(.5)
                 
         except Exception:
-            # Raunt geçişlerinde oluşabilecek anlık okuma sapmalarında çökmesini önler
-            sleep(0.1)
+            time.sleep(0.1)
             continue
 
 if __name__ == "__main__":
