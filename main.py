@@ -8,7 +8,7 @@ import socketserver
 import threading
 import json
 
-# --- Windows Hafıza Okuma API Yapılandırması ---
+# --- Windows Hafıza Okuma API Yapılandırması (Sıfır Bağımlılık) ---
 kernel32 = ctypes.windll.kernel32
 PROCESS_VM_READ = 0x0010
 PROCESS_QUERY_INFORMATION = 0x0400
@@ -68,7 +68,7 @@ def read_vec3(handle, address):
         return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
     return {"x": 0, "y": 0, "z": 0}
 
-# --- 2026 Ofsetleri ---
+# --- 2026 Güncel Ofset Yapılandırması ---
 class Offsets: 
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
@@ -89,11 +89,11 @@ class Entity:
     @property
     def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
 
-# Küresel Paylaşılan Veri Yapısı (Web sunucusu burayı okuyacak)
+# Sunucu ve hafıza motoru arasındaki küresel veri köprüsü
 radar_data = {"yaw": 0, "enemies": []}
 
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, format, *args): return # Konsolu HTTP istek loglarıyla kirletmemek için kapatıyoruz
+    def log_message(self, format, *args): return # HTTP istek logları terminali kirletmesin diye kapatıldı
     
     def do_GET(self):
         if self.path == '/data':
@@ -116,7 +116,7 @@ def run_web_server():
         print(f"[+] Web Radar Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- WEB ARAYÜZÜ (HTML5 & Canvas & JavaScript) ---
+# --- MODERN HTML5 CANVAS RADAR ARAYÜZÜ ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -138,12 +138,12 @@ HTML_RADAR_UI = """
         const canvas = document.getElementById('radar');
         const ctx = canvas.getContext('2d');
         const center = canvas.width / 2;
-        const SCALE = 0.18; // Web görünümü için ideal mesafe ölçeği
+        const SCALE = 0.18; // Radar harita ölçeği / yakınlaştırma derecesi
 
         function drawRadarGrid() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
-            // Radar Halkaları
+            // Radar İç Halkaları
             ctx.strokeStyle = '#242b35';
             ctx.lineWidth = 1;
             for(let r = 100; r <= center; r += 100) {
@@ -152,13 +152,13 @@ HTML_RADAR_UI = """
                 ctx.stroke();
             }
 
-            // Radar Çapraz Çizgileri
+            // Radar Çapraz Eksen Çizgileri
             ctx.beginPath();
             ctx.moveTo(center, 0); ctx.lineTo(center, canvas.height);
             ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
             ctx.stroke();
 
-            // Merkez Oyuncu (Sen)
+            // Merkezdeki Oyuncu Simgesi (Sen)
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
             ctx.moveTo(center, center - 8);
@@ -178,22 +178,22 @@ HTML_RADAR_UI = """
                 const yawRad = (data.yaw * Math.PI) / 180;
 
                 data.enemies.forEach(enemy => {
-                    // Pozisyon farkları
                     let dx = enemy.x;
                     let dy = enemy.y;
 
-                    // Kendi bakış açımıza göre 2D rotasyon matrisi
+                    // Oyuncunun bakış açısına (Yaw) göre 2D Rotasyon Matrisi dönüşümü
                     let rx = dx * Math.cos(-yawRad) - dy * Math.sin(-yawRad);
                     let ry = dx * Math.sin(-yawRad) + dy * Math.cos(-yawRad);
 
-                    // Ekrana izdüşüm
+                    // Ekrana yerleşim piksel hesabı
                     let screenX = center + (rx * SCALE);
                     let screenY = center - (ry * SCALE);
 
-                    // Çember sınırları içinde tutma (Kırpma)
+                    // Sınır kırpma kontrolü (Düşmanın radardan taşmasını önler)
                     let distFromCenter = Math.sqrt(Math.pow(screenX - center, 2) + Math.pow(screenY - center, 2));
                     if (distFromCenter < center - 10) {
-                        ctx.fillStyle = `rgb(255, ${Math.floor(enemy.health * 2.55)}, 0)`; // Cana göre renklendirme (Kırmızı -> Sarı)
+                        // Can değerine göre dinamik renk değişimi (Yeşil -> Kırmızı)
+                        ctx.fillStyle = `rgb(255, ${Math.floor(enemy.health * 2.55)}, 0)`;
                         ctx.beginPath();
                         ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI);
                         ctx.fill();
@@ -203,7 +203,7 @@ HTML_RADAR_UI = """
                     }
                 });
             } catch (e) { }
-            setTimeout(updateRadar, 30); // 33 FPS güncelleme hızı
+            setTimeout(updateRadar, 30); // Akıcı yenileme hızı (~33 FPS)
         }
         updateRadar();
     </script>
@@ -217,18 +217,18 @@ def main():
     while pid is None:
         pid = get_process_id("cs2.exe")
         if pid is None:
-            sys.stdout.write("\r[ Waiting ] CS2.exe bekleniyor... \x1b[K")
+            sys.stdout.write("\r[ Waiting ] cs2.exe bekleniyor... Lutfen oyunu acin. \x1b[K")
             sys.stdout.flush()
             time.sleep(1)
 
     handle = kernel32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
     base = get_module_base(pid, "client.dll")
 
-    # Web sunucusunu ana döngüyü kilitlememesi için ayrı bir Thread (iş parçacığı) olarak başlatıyoruz
+    # Web sunucusunu ana döngüden ayırmak (Thread) için arka planda tetikliyoruz
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    print("[+] Hafiza tarama motoru aktif. Veriler web arayuzune aktariliyor.")
+    print("[+] Hafiza motoru aktif hale getirildi. Veriler web sunucusuna aktariliyor.")
 
     while True:
         try:
@@ -264,20 +264,20 @@ def main():
                     player_pos = player.position
                     if player_pos["x"] == 0 and player_pos["y"] == 0: continue
 
-                    # Sadece ham mesafe farklarını web arayüzüne paslıyoruz (Matematik tarayıcıda çözülecek)
+                    # Sözdizimi hatası düzeldi: doğrudan can verisi aktarılıyor
                     temp_enemies.append({
                         "x": player_pos["x"] - local_pos["x"],
                         "y": player_pos["y"] - local_pos["y"],
-                        "health": player_index := player.health
+                        "health": player.health
                     })
 
-            # Küresel değişkeni güvenli bir şekilde güncelle
+            # Küresel verileri güvenli ve stabil olarak güncelle
             radar_data = {
                 "yaw": view_angles_y,
                 "enemies": temp_enemies
             }
             
-            time.sleep(0.015) # Hafıza okuma frekansı (~60Hz)
+            time.sleep(0.015) # 60Hz tarama frekansı
                 
         except Exception:
             time.sleep(0.1)
@@ -285,4 +285,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+                
