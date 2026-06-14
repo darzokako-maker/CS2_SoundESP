@@ -21,14 +21,14 @@ class Config:
 
 class Offsets: 
     # 2026 Tarihli offsets.hpp Dosyasından Alınan Güncel Ana Adresler
-    dwEntityList = 0x24E76A0       
-    dwLocalPlayerPawn = 0x2341698  
+    dwEntityList = 0x24E76A0       #
+    dwLocalPlayerPawn = 0x2341698  #
 
     # 2026 Tarihli client_dll.hpp Dosyasından Alınan Güncel Sınıf İçi Ofsetler
-    m_iTeamNum = 0x3EB             
-    m_iHealth = 0x34C              
-    m_vOldOrigin = 0x1390          
-    m_hPlayerPawn = 0x90C          
+    m_iTeamNum = 0x3EB             #
+    m_iHealth = 0x34C              #
+    m_vOldOrigin = 0x1390          #
+    m_hPlayerPawn = 0x90C          #
 
 class Entity:
     def __init__(self, proc, pawn):
@@ -106,7 +106,6 @@ def main():
                     local_pos = localPlayer.position
                     player_pos = player.position
                     
-                    # Geçersiz koordinat kontrolü
                     if local_pos["x"] == 0 and player_pos["x"] == 0:
                         continue
                         
@@ -114,11 +113,14 @@ def main():
                     if dist < lowestDist:
                         lowestDist = dist
 
-            # Mesafe ekran çıktısı kontrolü
+            # SES YERİNE TERMİNALE BASMA MANTIĞI (Projedeki Yapı Aynen Korundu)
             if lowestDist < Config.distance:
                 duration = max(150, lowestDist / 2)
+                
+                # \r imleci satırın başına çeker, \x1b[K ise eski satırdan kalan yazıları siler.
                 sys.stdout.write(f"\r[DUSMAN YAKINDA] En Yakin Dusman Mesafesi: {lowestDist:.2f} birim \x1b[K")
                 sys.stdout.flush()
+                
                 sleep(duration / 2500)
             else:
                 sys.stdout.write("\r[GUVENLI] Belirlenen mesafede dusman yok. \x1b[K")
