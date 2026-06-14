@@ -1,23 +1,26 @@
 """
-External CS2 Sound/Sonar ESP
-by im-razvan
+External CS2 Terminal Distance ESP
+by im-razvan (Offsets updated from 2026 dump files)
 """
 
 import pyMeow as pm
 from math import sqrt, inf
-from winsound import Beep
 from time import sleep
+import sys
 
 class Config:
     distance = 1300
 
-class Offsets: # 3.01.2024
-    dwEntityList = 0x24E76A0
-    dwLocalPlayerPawn = 0x2341698
-    m_iTeamNum = 0x3EB
-    m_iHealth = 0x34C
-    m_vOldOrigin = 0x1390
-    m_hPlayerPawn = 0x90C
+class Offsets: 
+    # 11.06.2026 Tarihli offsets.hpp Dosyasından Alınan Güncel Ana Adresler
+    dwEntityList = 0x24E76A0       # offsets.hpp -> dwEntityList
+    dwLocalPlayerPawn = 0x2341698  # offsets.hpp -> dwLocalPlayerPawn
+
+    # 11.06.2026 Tarihli client_dll.hpp Dosyasından Alınan Güncel Sınıf İçi Ofsetler
+    m_iTeamNum = 0x3EB             # client_dll.hpp -> C_BaseEntity -> m_iTeamNum
+    m_iHealth = 0x34C              # client_dll.hpp -> C_BaseEntity -> m_iHealth
+    m_vOldOrigin = 0x1390          # client_dll.hpp -> C_BasePlayerPawn -> m_vOldOrigin
+    m_hPlayerPawn = 0x90C          # client_dll.hpp -> CCSPlayerController -> m_hPlayerPawn
 
 class Entity:
     def __init__(self, proc, pawn):
@@ -40,10 +43,15 @@ def distance(player, entity):
     return sqrt((player["x"] - entity["x"])**2 + (player["y"] - entity["y"])**2 + (player["z"] - entity["z"])**2)
 
 def main():
-    proc = pm.open_process("cs2.exe")
-    base = pm.get_module(proc, "client.dll")["base"]
+    try:
+        proc = pm.open_process("cs2.exe")
+        base = pm.get_module(proc, "client.dll")["base"]
+    except Exception as e:
+        print(f"Hata: CS2 acik degil veya client.dll bulunamadi! ({e})")
+        return
 
-    print("Started CS2 Sound ESP.")
+    print("Started CS2 Terminal ESP with updated 2026 offsets.")
+    print("--------------------------------------------------")
 
     while True:
         EntityList = pm.r_uint64(proc, base + Offsets.dwEntityList)
@@ -52,7 +60,7 @@ def main():
 
         lowestDist = inf
 
-        for i in range(1,64):
+        for i in range(1, 64):
             listEntry = pm.r_uint64(proc, EntityList + (8 * (i & 0x7FFF) >> 9) + 16)
             if listEntry == 0: continue   
             entity = pm.r_uint64(proc, listEntry + 112 * (i & 0x1FF))
@@ -71,14 +79,21 @@ def main():
                 if dist < lowestDist:
                     lowestDist = dist
 
+        # SES YERİNE TERMİNALE BASMA MANTIĞI (Projedeki Yapı Aynen Korundu)
         if lowestDist < Config.distance:
-            pitch = max(1500, 3300 - lowestDist)
             duration = max(150, lowestDist / 2)
-            Beep(int(pitch), int(duration))
-            sleep(duration/2500)
+            
+            # \r imleci satırın başına çeker, \x1b[K ise eski satırdan kalan yazıları siler.
+            # Böylece terminal pencereni kirletmeden tek satır üzerinde akıcı olarak mesafe takibi yapabilirsin.
+            sys.stdout.write(f"\r[DUSMAN YAKINDA] En Yakin Dusman Mesafesi: {lowestDist:.2f} birim \x1b[K")
+            sys.stdout.flush()
+            
+            sleep(duration / 2500)
         else:
+            sys.stdout.write("\r[GUVENLI] Belirlenen mesafede dusman yok. \x1b[K")
+            sys.stdout.flush()
             sleep(.5)
-
 
 if __name__ == "__main__":
     main()
+    
