@@ -124,7 +124,6 @@ def read_string(handle, address, max_len=32):
     bytes_read = ctypes.c_size_t()
     if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), max_len, ctypes.byref(bytes_read)) == 0:
         try:
-            # Önce pointer zinciri kontrolü için adresten string okuyoruz
             val = buffer.value.decode('utf-8', errors='ignore').strip()
             return val if val else "Player"
         except:
@@ -145,17 +144,17 @@ class Offsets:
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
     dwCSGOInput = 0x2356240        
-    dwGlobalVars = 0x17CD0F0       # Bomba süresi takibi için global değişkenler pointerı
+    dwGlobalVars = 0x17CD0F0       
     m_iTeamNum = 0x3EB             
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
     m_hPlayerPawn = 0x90C          
-    m_iszPlayerName = 0x638        # Controller (Entity) üzerinde yer alır
-    m_pInGameMoneyServices = 0x6F8 # Controller (Entity) üzerinde yer alır
+    m_iszPlayerName = 0x638        
+    m_pInGameMoneyServices = 0x6F8 
     m_iAccount = 0x40              
     
     # Bomba Ofsetleri
-    dwPlantedC4 = 0x19213A0        # PlantedC4 ana pointer adresi
+    dwPlantedC4 = 0x19213A0        
     m_bBombPlanted = 0x99D         
     m_flTimerLength = 0xF18        
     m_flC4Blow = 0xF1C             
@@ -176,7 +175,6 @@ class Entity:
     @property
     def name(self):
         if not self.controller: return "LocalPlayer"
-        # İsim verisi controller içerisindeki adresten doğrudan veya dereference edilerek okunur
         name_ptr = read_memory(self.handle, self.controller + Offsets.m_iszPlayerName, ctypes.c_uint64)
         if name_ptr:
             return read_string(self.handle, name_ptr, 32)
@@ -185,12 +183,11 @@ class Entity:
     @property
     def money(self):
         if not self.controller: return 0
-        # Ekonomi ve para durumları controller verisinde saklanır
         money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
-# Global Veri Köprüsü (Bomb verileri eklendi)
+# Global Veri Köprüsü
 radar_data = {
     "yaw": 0, 
     "local_team": 0, 
@@ -222,7 +219,7 @@ def run_web_server():
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- Taktiksel HTML5 UI (Yön Senkronizasyonu ve Bomb Timer Eklendi) ---
+# --- Taktiksel HTML5 UI ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -275,7 +272,7 @@ HTML_RADAR_UI = """
         const canvas = document.getElementById('radar');
         const ctx = canvas.getContext('2d');
         const center = canvas.width / 2;
-        const SCALE = 0.15; // Mesafe hassasiyet ayarı
+        const SCALE = 0.15;
 
         function drawRadarGrid() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -289,7 +286,6 @@ HTML_RADAR_UI = """
             ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
             ctx.stroke();
 
-            // Merkezdeki yerel oyuncu imleci (Yukarı sabit bakıyor, harita dönecek)
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
             ctx.moveTo(center, center - 12);
@@ -326,7 +322,6 @@ HTML_RADAR_UI = """
                 const response = await fetch('/data');
                 const data = await response.json();
                 
-                // Bomba Durum Çubuğu Güncellemesi
                 const bombEl = document.getElementById('bombStatus');
                 if (data.bomb_planted && data.bomb_time_left > 0) {
                     bombEl.innerText = `⚠️ BOMBA KURULDU: \${data.bomb_time_left.toFixed(2)}s`;
@@ -338,7 +333,6 @@ HTML_RADAR_UI = """
 
                 drawRadarGrid();
                 
-                // Dönüş Mantığı: Yaw açısı radyana çevrilir (Eksen düzeltildi)
                 const viewAngleRad = ((data.yaw - 90) * Math.PI) / 180;
 
                 let myTeamHTML = "";
@@ -352,7 +346,6 @@ HTML_RADAR_UI = """
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        // Oyuncunun baktığı yöne göre haritayı/imleçleri döndürme hesabı
                         let rx = p.dx * Math.cos(viewAngleRad) + p.dy * Math.sin(viewAngleRad);
                         let ry = -p.dx * Math.sin(viewAngleRad) + p.dy * Math.cos(viewAngleRad);
 
@@ -417,7 +410,7 @@ def main():
             local_pos = localPlayer.position
             local_team = localPlayer.team
             view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
-            current_time = read_memory(handle, globalVars + 0x2C, ctypes.c_float) # currentTime okuma
+            current_time = read_memory(handle, globalVars + 0x2C, ctypes.c_float)
 
             # --- Bomba Süresi Mantığı ---
             bomb_planted = False
@@ -428,4 +421,18 @@ def main():
                 planted_c4 = read_memory(handle, planted_c4_base, ctypes.c_uint64)
                 if planted_c4:
                     is_planted = read_memory(handle, planted_c4 + Offsets.m_bBombPlanted, ctypes.c_bool)
-                
+                    if is_planted:
+                        bomb_planted = True
+                        c4_blow = read_memory(handle, planted_c4 + Offsets.m_flC4Blow, ctypes.c_float)
+                        time_remaining = c4_blow - current_time
+                        bomb_time_left = max(0.0, time_remaining)
+
+            temp_players = []
+
+            for i in range(1, 64):
+                listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
+                if listEntry == 0: continue   
+                entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
+                if entity == 0: continue                          
+                entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
+                if entityCPawn == 0: continue
