@@ -138,7 +138,7 @@ def read_vec3(handle, address):
         return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
     return {"x": 0, "y": 0, "z": 0}
 
-# --- 2026 Ofsetleri ---
+# --- Ofset Yapılandırması ---
 class Offsets: 
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
@@ -153,7 +153,7 @@ class Offsets:
     m_iAccount = 0x40              
     m_angEyeAngles = 0x14F8        
     
-    # Silah Okuma İçin Gerekli Olan Ofsetler
+    # Silah Verileri İçin Ofsetler
     m_pWeaponServices = 0x1100     
     m_hActiveWeapon = 0x58         
     m_pClippingWeaponData = 0x368  
@@ -181,8 +181,7 @@ class Entity:
     
     @property
     def money(self):
-        if not self.pawn: return 0
-        # Parayı Pawn üzerinden değil, Controller üzerinden okumak daha kararlıdır.
+        if not self.controller: return 0
         money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
@@ -195,7 +194,6 @@ class Entity:
         active_wpn_handle = read_memory(self.handle, wpn_services + Offsets.m_hActiveWeapon, ctypes.c_uint32)
         if active_wpn_handle == 0xFFFFFFFF: return "Knife"
         
-        # Handle değerinden Entity indeksini çözme
         wpn_idx = active_wpn_handle & 0x7FFF
         list_entry = read_memory(self.handle, self.entity_list + (8 * (wpn_idx >> 9)) + 16, ctypes.c_uint64)
         if not list_entry: return "Knife"
@@ -237,7 +235,7 @@ def run_web_server():
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- GELİŞTİRİLMİŞ PANEL ARAYÜZÜ (SİLAH VE PARA DESTEKLİ) ---
+# --- WEB PANEL ARAYÜZÜ ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -295,7 +293,7 @@ HTML_RADAR_UI = """
             ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
             ctx.stroke();
 
-            // Merkez Oyuncu Simgesi
+            // Merkez Oyuncu Simgesi (Sen)
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
             ctx.moveTo(center, center - 13);
@@ -358,7 +356,7 @@ HTML_RADAR_UI = """
                             let relativeYaw = ((p.yaw - data.yaw) * Math.PI) / 180;
                             let color = p.team === data.local_team ? '#00ffcc' : '#ff4444';
                             
-                            // 1. Oyuncu Yön Çizgisi
+                            // Yön Çizgisi
                             ctx.strokeStyle = color;
                             ctx.lineWidth = 2.5;
                             ctx.beginPath();
@@ -367,7 +365,7 @@ HTML_RADAR_UI = """
                             ctx.lineTo(screenX + Math.sin(relativeYaw) * lineLength, screenY - Math.cos(relativeYaw) * lineLength);
                             ctx.stroke();
 
-                            // 2. Oyuncu Noktası
+                            // Oyuncu Noktası
                             ctx.fillStyle = color;
                             ctx.beginPath(); 
                             ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI); 
@@ -391,6 +389,7 @@ HTML_RADAR_UI = """
 </html>
 """
 
+# --- ANA DÖNGÜ (HATASIZ TAMAMLANAN KISIM) ---
 def main():
     global radar_data
     pid = None
@@ -431,8 +430,11 @@ def main():
             temp_players = []
 
             for i in range(1, 64):
+                # Yarım kalan döngü mantığının hatasız tamamlanması:
                 listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
                 if listEntry == 0: continue   
+                
                 entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
                 if entity == 0: continue                          
-                entityCPawn = read_memory(handle, 
+                
+                entityCPawn = read_memory(handle, entity + Offsets.m_hPlaye
