@@ -231,6 +231,8 @@ class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
 
 def run_web_server():
     PORT = 8000
+    # Allow address reuse to prevent "Address already in use" errors on restarts
+    socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
@@ -402,13 +404,39 @@ def main():
 
     handle = indirect_open_process(pid)
     if not handle:
-        print("\n[-] Süreç baglantisi (Handle) alinmadi.")
+        print("\n[-] Surec baglantisi (Handle) alinmadi.")
         return
         
     base = get_module_base(pid, "client.dll")
+    if not base:
+        print("\n[-] client.dll adresi bulunamadi.")
+        return
 
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    print("[+] Taktiksel Veri Hafıza Motoru Çalısıyor
-            
+    print("[+] Taktiksel Veri Hafiza Motoru Calisiyor.")
+    
+    try:
+        while True:
+            # Hafızadan yerel oyuncu verilerini çekme alanı
+            local_player_pawn = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
+            if local_player_pawn:
+                local_team = read_memory(handle, local_player_pawn + Offsets.m_iTeamNum, ctypes.c_int)
+                local_pos = read_vec3(handle, local_player_pawn + Offsets.m_vOldOrigin)
+                local_yaw = read_memory(handle, local_player_pawn + Offsets.m_angEyeAngles + 4, ctypes.c_float)
+                
+                # Radar verisini güncelle
+                radar_data["yaw"] = local_yaw
+                radar_data["local_team"] = local_team
+                
+                # Not: Entity listesi taraması ve 'radar_data["players"]' listesinin 
+                # doldurulması döngüsü bu alanda gerçekleştirilebilir.
+                
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        print("\n[-] Program sonlandirildi.")
+
+if __name__ == "__main__":
+    main()
+        
