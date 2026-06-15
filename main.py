@@ -8,7 +8,7 @@ import socketserver
 import threading
 import json
 
-# --- Windows Hafıza Okuma API Yapılandırması (64-bit Onarımlı) ---
+# --- Windows Hafıza Okuma API Yapılandırması (Indirect Syscall) ---
 kernel32 = ctypes.windll.kernel32
 
 kernel32.VirtualAlloc.restype = ctypes.c_void_p
@@ -23,7 +23,6 @@ kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 
-# Global C-Struct Tanımlamaları (Hizalama ve Çökmeleri Önlemek İçin Globalde)
 class CLIENT_ID(ctypes.Structure):
     _fields_ = [("UniqueProcess", wintypes.HANDLE), ("UniqueThread", wintypes.HANDLE)]
 
@@ -48,7 +47,6 @@ class MODULEENTRY32(ctypes.Structure):
         ("modBaseSize", wintypes.DWORD), ("hModule", wintypes.HANDLE), ("szModule", ctypes.c_char * 256), ("szExePath", ctypes.c_char * 260)
     ]
 
-# --- MEŞRU SYSCALL BULUCU VE ASSEMBLY KÖPRÜLERİ ---
 def _get_ntdll_syscall_address():
     h_ntdll = kernel32.GetModuleHandleW("ntdll.dll")
     nt_read_addr = kernel32.GetProcAddress(h_ntdll, b"NtReadVirtualMemory")
@@ -62,7 +60,6 @@ def _get_ntdll_syscall_address():
 
 _LEGAL_SYSCALL_ADDR = _get_ntdll_syscall_address()
 
-# NtOpenProcess (Syscall ID: 0x0026) & NtReadVirtualMemory (Syscall ID: 0x003F)
 _op_shellcode = b"\x4C\x8B\xD1\xB8\x26\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 _rvm_shellcode = b"\x4C\x8B\xD1\xB8\x3F\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 
@@ -82,7 +79,6 @@ def indirect_open_process(pid):
         return handle.value
     return None
 
-# --- Orijinal Fonksiyon Yapılarının Indirect Sürümleri ---
 def get_process_id(process_name):
     TH32CS_SNAPPROCESS = 0x00000002
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -116,7 +112,6 @@ def get_module_base(pid, module_name):
     kernel32.CloseHandle(snapshot)
     return None
 
-# API yerine Indirect Çağrı kullanan hafıza okuma fonksiyonları
 def read_memory(handle, address, c_type):
     buffer = c_type()
     bytes_read = ctypes.c_size_t()
@@ -148,6 +143,7 @@ class Offsets:
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
     dwCSGOInput = 0x2356240        
+    
     m_iTeamNum = 0x3EB             
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
@@ -155,6 +151,7 @@ class Offsets:
     m_iszPlayerName = 0x638        
     m_pInGameMoneyServices = 0x6F8 
     m_iAccount = 0x40              
+    m_angEyeAngles = 0x14F8        
 
 class Entity:
     def __init__(self, handle, controller, pawn):
@@ -169,6 +166,8 @@ class Entity:
     @property
     def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
     @property
+    def yaw(self): return read_memory(self.handle, self.pawn + Offsets.m_angEyeAngles + 4, ctypes.c_float)
+    @property
     def name(self):
         if not self.controller: return "Player"
         return read_string(self.handle, self.controller + Offsets.m_iszPlayerName, 32)
@@ -179,7 +178,6 @@ class Entity:
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
-# Global Veri Köprüsü
 radar_data = {"yaw": 0, "local_team": 0, "players": []}
 
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
@@ -205,7 +203,7 @@ def run_web_server():
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- 3 BÖLMELİ HTML5 & CSS3 ARAYÜZÜ (DEĞİŞTİRİLMEDİ) ---
+# --- 3 BÖLMELİ HTML5 & CSS3 VE YÖN OKLU RADAR ARAYÜZÜ ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -264,9 +262,9 @@ HTML_RADAR_UI = """
 
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
-            ctx.moveTo(center, center - 10);
-            ctx.lineTo(center - 7, center + 7);
-            ctx.lineTo(center + 7, center + 7);
+            ctx.moveTo(center, center - 13);
+            ctx.lineTo(center - 8, center + 6);
+            ctx.lineTo(center + 8, center + 6);
             ctx.closePath(); ctx.fill();
         }
 
@@ -299,7 +297,8 @@ HTML_RADAR_UI = """
                 const data = await response.json();
                 
                 drawRadarGrid();
-                const yawRad = (data.yaw * Math.PI) / 180;
+                
+                const localYawRad = (data.yaw * Math.PI) / 180;
 
                 let myTeamHTML = "";
                 let enemyTeamHTML = "";
@@ -312,17 +311,35 @@ HTML_RADAR_UI = """
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        let rx = p.dx * Math.cos(-yawRad) - p.dy * Math.sin(-yawRad);
-                        let ry = p.dx * Math.sin(-yawRad) + p.dy * Math.cos(-yawRad);
+                        let rx = p.dx * Math.cos(-localYawRad) - p.dy * Math.sin(-localYawRad);
+                        let ry = p.dx * Math.sin(-localYawRad) + p.dy * Math.cos(-localYawRad);
 
                         let screenX = center + (rx * SCALE);
                         let screenY = center - (ry * SCALE);
 
                         let dist = Math.sqrt(Math.pow(screenX - center, 2) + Math.pow(screenY - center, 2));
                         if (dist < center - 10) {
-                            ctx.fillStyle = p.team === data.local_team ? '#00ffcc' : '#ff4444';
-                            ctx.beginPath(); ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI); ctx.fill();
-                            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+                            let relativeYaw = ((p.yaw - data.yaw) * Math.PI) / 180;
+                            let color = p.team === data.local_team ? '#00ffcc' : '#ff4444';
+                            
+                            ctx.strokeStyle = color;
+                            ctx.lineWidth = 2.5;
+                            ctx.beginPath();
+                            ctx.moveTo(screenX, screenY);
+                            
+                            let lineLength = 15;
+                            let targetX = screenX + Math.sin(relativeYaw) * lineLength;
+                            let targetY = screenY - Math.cos(relativeYaw) * lineLength;
+                            ctx.lineTo(targetX, targetY);
+                            ctx.stroke();
+
+                            ctx.fillStyle = color;
+                            ctx.beginPath(); 
+                            ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI); 
+                            ctx.fill();
+                            ctx.strokeStyle = '#ffffff'; 
+                            ctx.lineWidth = 1.5; 
+                            ctx.stroke();
                         }
                     }
                 });
@@ -349,7 +366,6 @@ def main():
             sys.stdout.flush()
             time.sleep(1)
 
-    # REZERVASYON DEĞİŞİKLİĞİ: Orijinal kernel32.OpenProcess yerine Indirect NtOpenProcess çağrısı
     handle = indirect_open_process(pid)
     if not handle:
         print("\n[-] Süreç baglantisi (Handle) alinmadi.")
@@ -401,6 +417,7 @@ def main():
                     "health": player.health,
                     "money": player.money,
                     "team": player.team,
+                    "yaw": player.yaw, 
                     "is_local": is_local,
                     "dx": player_pos["x"] - local_pos["x"],
                     "dy": player_pos["y"] - local_pos["y"]
@@ -412,12 +429,10 @@ def main():
                 "players": temp_players
             }
             
-            time.sleep(0.02)
-                
-        except Exception:
-            time.sleep(0.1)
-            continue
+            time.sleep(0.01)  # CPU optimizasyonu
+
+        except Exception as e:
+            time.sleep(0.2)  # Hata durumunda döngü yavaşlatma
 
 if __name__ == "__main__":
     main()
-        
