@@ -231,7 +231,6 @@ class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
 
 def run_web_server():
     PORT = 8000
-    # Allow address reuse to prevent "Address already in use" errors on restarts
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
@@ -419,24 +418,22 @@ def main():
     
     try:
         while True:
-            # Hafızadan yerel oyuncu verilerini çekme alanı
+            EntityList = read_memory(handle, base + Offsets.dwEntityList, ctypes.c_uint64)
             local_player_pawn = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
-            if local_player_pawn:
+            
+            if local_player_pawn and EntityList:
                 local_team = read_memory(handle, local_player_pawn + Offsets.m_iTeamNum, ctypes.c_int)
                 local_pos = read_vec3(handle, local_player_pawn + Offsets.m_vOldOrigin)
                 local_yaw = read_memory(handle, local_player_pawn + Offsets.m_angEyeAngles + 4, ctypes.c_float)
                 
-                # Radar verisini güncelle
-                radar_data["yaw"] = local_yaw
-                radar_data["local_team"] = local_team
-                
-                # Not: Entity listesi taraması ve 'radar_data["players"]' listesinin 
-                # doldurulması döngüsü bu alanda gerçekleştirilebilir.
-                
-            time.sleep(0.05)
-    except KeyboardInterrupt:
-        print("\n[-] Program sonlandirildi.")
+                temp_players = []
 
-if __name__ == "__main__":
-    main()
-        
+                # 1 ile 64 arasındaki tüm oyuncu slotlarını tara
+                for i in range(1, 64):
+                    listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
+                    if listEntry == 0: continue   
+                    
+                    entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
+                    if entity == 0: continue                          
+                    
+                    entityCPawn 
