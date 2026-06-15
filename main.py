@@ -436,6 +436,7 @@ def main():
                 entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
                 if entity == 0: continue                          
                 
-                # Hatalı olan m_hPlaye parantez kaçırma problemi tam olarak düzeltildi:
                 entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
-                
+                if entityCPawn == 0: continue   
+
+        
