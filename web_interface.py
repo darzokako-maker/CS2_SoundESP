@@ -2,12 +2,18 @@ import http.server
 import socketserver
 import json
 import sys
+import os
 from multiprocessing.managers import BaseManager
+
+# PyInstaller geçici klasör dizini kontrolü (EXE olarak çalışırken burayı kullanır)
+if getattr(sys, 'frozen', False):
+    base_path = sys._MEIPASS
+else:
+    base_path = os.path.dirname(os.path.abspath(__file__))
 
 class TokenManager(BaseManager): pass
 TokenManager.register('get_radar_data')
 
-# Motor sunucusuna bağlanmayı dene
 try:
     manager = TokenManager(address=('127.0.0.1', 50001), authkey=b'radar_secret')
     manager.connect()
@@ -25,7 +31,6 @@ class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            # Paylaşılan proxy verisini kopyalayıp JSON'a dönüştür
             local_dict = dict(remote_radar_data)
             self.wfile.write(json.dumps(local_dict).encode('utf-8'))
         elif self.path == '/' or self.path == '/index.html':
@@ -196,4 +201,4 @@ def run_web_server():
 
 if __name__ == "__main__":
     run_web_server()
-  
+    
