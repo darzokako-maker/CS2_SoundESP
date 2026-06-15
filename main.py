@@ -410,33 +410,5 @@ def main():
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    print("[+] Taktiksel Veri Hafıza Motoru Çalısıyor... (Indirect Syscall)")
-
-    while True:
-        try:
-            EntityList = read_memory(handle, base + Offsets.dwEntityList, ctypes.c_uint64)
-            localPlayerPawnAddr = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
-            csgoInput = read_memory(handle, base + Offsets.dwCSGOInput, ctypes.c_uint64)
+    print("[+] Taktiksel Veri Hafıza Motoru Çalısıyor
             
-            if not localPlayerPawnAddr or not csgoInput:
-                time.sleep(0.1)
-                continue
-                
-            localPlayer = Entity(handle, 0, localPlayerPawnAddr)
-            local_pos = localPlayer.position
-            local_team = localPlayer.team
-            view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
-
-            temp_players = []
-
-            for i in range(1, 64):
-                listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
-                if listEntry == 0: continue   
-                
-                entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
-                if entity == 0: continue                          
-                
-                entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
-                if entityCPawn == 0: continue   
-
-        
