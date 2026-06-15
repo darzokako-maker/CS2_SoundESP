@@ -270,7 +270,7 @@ def memory_scanner_thread():
 # 4. HATA TOLERANSLI WEB SUNUCUSU
 # ==============================================================================
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
-    def log_message(self, format, *args): return  # Konsol kirliliğini önlemek için logları gizle
+    def log_message(self, format, *args): return
     def do_GET(self):
         global global_radar_data
         if self.path == '/data':
@@ -288,9 +288,8 @@ class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(404)
 
-# --- WEB PANEL ARAYÜZÜ (HTML) ---
-HTML_RADAR_UI = """
-<!DOCTYPE html>
+# --- WEB PANEL ARAYÜZÜ (HTML & JAVASCRIPT BÜTÜNÜ) ---
+HTML_RADAR_UI = """<!DOCTYPE html>
 <html>
 <head>
     <title>CS2 Tactical Web Dashboard</title>
@@ -362,17 +361,17 @@ HTML_RADAR_UI = """
             else if(player.health < 70) hpColor = '#f1c40f';
 
             return `
-                <div class="player-card ${statusClass}">
+                <div class="player-card \${statusClass}">
                     <div class="player-row">
-                        <span class="player-name">${player.name}</span>
-                        <span class="player-money">$${player.money}</span>
+                        <span class="player-name">\${player.name}</span>
+                        <span class="player-money">$\${player.money}</span>
                     </div>
                     <div class="player-row" style="font-size: 11px; color: #a0aab5;">
-                        <span>HP: ${player.health}</span>
-                        <span class="player-weapon">${player.health > 0 ? player.weapon : 'DEAD'}</span>
+                        <span>HP: \${player.health}</span>
+                        <span class="player-weapon">\${player.health > 0 ? player.weapon : 'DEAD'}</span>
                     </div>
                     <div class="hp-bar-bg">
-                        <div class="hp-bar-fill" style="width: ${hpWidth}%; background-color: ${hpColor};"></div>
+                        <div class="hp-bar-fill" style="width: \${hpWidth}%; background-color: \${hpColor};"></div>
                     </div>
                 </div>
             `;
@@ -397,11 +396,5 @@ HTML_RADAR_UI = """
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                                            
                         let rx = p.dx * Math.cos(-localYawRad) - p.dy * Math.sin(-localYawRad);
-                        let ry = p.dx * Math.sin(-localYawRad) + p.dy * Math.cos(-localYawRad);
-
-                        let screenX = center + (rx * SCALE);
-                        let screenY = center - (ry * SCALE);
-                        
-                        
+                        let ry = p.dx * Math.sin(-localYawRad)
