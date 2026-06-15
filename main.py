@@ -8,7 +8,7 @@ import socketserver
 import threading
 import json
 
-# --- Windows Hafıza Okuma API Yapılandırması (64-bit Onarımlı) ---
+# --- Windows Hafıza Okuma API Yapılandırması ---
 kernel32 = ctypes.windll.kernel32
 
 kernel32.VirtualAlloc.restype = ctypes.c_void_p
@@ -23,7 +23,6 @@ kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 
-# Global C-Struct Tanımlamaları (Hizalama ve Çökmeleri Önlemek İçin Globalde)
 class CLIENT_ID(ctypes.Structure):
     _fields_ = [("UniqueProcess", wintypes.HANDLE), ("UniqueThread", wintypes.HANDLE)]
 
@@ -48,7 +47,6 @@ class MODULEENTRY32(ctypes.Structure):
         ("modBaseSize", wintypes.DWORD), ("hModule", wintypes.HANDLE), ("szModule", ctypes.c_char * 256), ("szExePath", ctypes.c_char * 260)
     ]
 
-# --- MEŞRU SYSCALL BULUCU VE ASSEMBLY KÖPRÜLERİ ---
 def _get_ntdll_syscall_address():
     h_ntdll = kernel32.GetModuleHandleW("ntdll.dll")
     nt_read_addr = kernel32.GetProcAddress(h_ntdll, b"NtReadVirtualMemory")
@@ -62,7 +60,6 @@ def _get_ntdll_syscall_address():
 
 _LEGAL_SYSCALL_ADDR = _get_ntdll_syscall_address()
 
-# NtOpenProcess (Syscall ID: 0x0026) & NtReadVirtualMemory (Syscall ID: 0x003F)
 _op_shellcode = b"\x4C\x8B\xD1\xB8\x26\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 _rvm_shellcode = b"\x4C\x8B\xD1\xB8\x3F\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 
@@ -82,7 +79,6 @@ def indirect_open_process(pid):
         return handle.value
     return None
 
-# --- Orijinal Fonksiyon Yapılarının Indirect Sürümleri ---
 def get_process_id(process_name):
     TH32CS_SNAPPROCESS = 0x00000002
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -116,7 +112,6 @@ def get_module_base(pid, module_name):
     kernel32.CloseHandle(snapshot)
     return None
 
-# API yerine Indirect Çağrı kullanan hafıza okuma fonksiyonları
 def read_memory(handle, address, c_type):
     buffer = c_type()
     bytes_read = ctypes.c_size_t()
@@ -129,10 +124,12 @@ def read_string(handle, address, max_len=32):
     bytes_read = ctypes.c_size_t()
     if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), max_len, ctypes.byref(bytes_read)) == 0:
         try:
-            return buffer.value.decode('utf-8', errors='ignore')
+            # Önce pointer zinciri kontrolü için adresten string okuyoruz
+            val = buffer.value.decode('utf-8', errors='ignore').strip()
+            return val if val else "Player"
         except:
-            return "Unknown"
-    return "Unknown"
+            return "Player"
+    return "Player"
 
 def read_vec3(handle, address):
     class Vec3(ctypes.Structure):
@@ -143,18 +140,25 @@ def read_vec3(handle, address):
         return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
     return {"x": 0, "y": 0, "z": 0}
 
-# --- 2026 Ofsetleri ---
+# --- Ofset Yapılandırması ---
 class Offsets: 
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
     dwCSGOInput = 0x2356240        
+    dwGlobalVars = 0x17CD0F0       # Bomba süresi takibi için global değişkenler pointerı
     m_iTeamNum = 0x3EB             
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
     m_hPlayerPawn = 0x90C          
-    m_iszPlayerName = 0x638        
-    m_pInGameMoneyServices = 0x6F8 
+    m_iszPlayerName = 0x638        # Controller (Entity) üzerinde yer alır
+    m_pInGameMoneyServices = 0x6F8 # Controller (Entity) üzerinde yer alır
     m_iAccount = 0x40              
+    
+    # Bomba Ofsetleri
+    dwPlantedC4 = 0x19213A0        # PlantedC4 ana pointer adresi
+    m_bBombPlanted = 0x99D         
+    m_flTimerLength = 0xF18        
+    m_flC4Blow = 0xF1C             
 
 class Entity:
     def __init__(self, handle, controller, pawn):
@@ -168,19 +172,32 @@ class Entity:
     def health(self): return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
     @property
     def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
+    
     @property
     def name(self):
-        if not self.controller: return "Player"
-        return read_string(self.handle, self.controller + Offsets.m_iszPlayerName, 32)
+        if not self.controller: return "LocalPlayer"
+        # İsim verisi controller içerisindeki adresten doğrudan veya dereference edilerek okunur
+        name_ptr = read_memory(self.handle, self.controller + Offsets.m_iszPlayerName, ctypes.c_uint64)
+        if name_ptr:
+            return read_string(self.handle, name_ptr, 32)
+        return "Player"
+        
     @property
     def money(self):
-        if not self.pawn: return 0
-        money_services = read_memory(self.handle, self.pawn + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
+        if not self.controller: return 0
+        # Ekonomi ve para durumları controller verisinde saklanır
+        money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
-# Global Veri Köprüsü
-radar_data = {"yaw": 0, "local_team": 0, "players": []}
+# Global Veri Köprüsü (Bomb verileri eklendi)
+radar_data = {
+    "yaw": 0, 
+    "local_team": 0, 
+    "players": [],
+    "bomb_planted": False,
+    "bomb_time_left": 0.0
+}
 
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args): return
@@ -205,14 +222,19 @@ def run_web_server():
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- 3 BÖLMELİ HTML5 & CSS3 ARAYÜZÜ (DEĞİŞTİRİLMEDİ) ---
+# --- Taktiksel HTML5 UI (Yön Senkronizasyonu ve Bomb Timer Eklendi) ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
 <head>
     <title>CS2 Tactical Web Dashboard</title>
     <style>
-        body { margin: 0; background: #0b0e14; display: flex; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; height: 100vh; overflow: hidden; }
+        body { margin: 0; background: #0b0e14; display: flex; flex-direction: column; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; height: 100vh; overflow: hidden; }
+        .top-bar { height: 50px; background: #11141c; display: flex; justify-content: center; align-items: center; border-bottom: 2px solid #1c212e; font-size: 16px; font-weight: bold; }
+        .bomb-alert { padding: 8px 20px; border-radius: 4px; background: #222; color: #8a96a3; transition: all 0.3s; }
+        .bomb-alert.active { background: #ff4444; color: #fff; box-shadow: 0 0 15px rgba(255, 68, 68, 0.5); animation: pulse 1s infinite alternate; }
+        @keyframes pulse { from { opacity: 0.8; } to { opacity: 1; } }
+        .main-container { display: flex; flex: 1; height: calc(100% - 52px); }
         .panel { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; padding: 20px; background: #11141c; border-right: 2px solid #1c212e; }
         .team-panel { width: 28%; overflow-y: auto; }
         .team-title { font-size: 18px; font-weight: bold; padding-bottom: 10px; margin-bottom: 15px; border-bottom: 2px solid; text-align: center; }
@@ -226,29 +248,34 @@ HTML_RADAR_UI = """
         .player-money { color: #2ecc71; font-weight: bold; font-family: monospace; }
         .hp-bar-bg { width: 100%; background: #222; height: 6px; border-radius: 3px; overflow: hidden; }
         .hp-bar-fill { height: 100%; background: #2ecc71; transition: width 0.1s; }
-        .center-panel { width: 44%; display: flex; justify-content: center; align-items: center; position: relative; background: #0d1017; }
+        .center-panel { width: 44%; display: flex; justify-content: center; align-items: center; position: relative; background: #0d1017; border-right: 2px solid #1c212e; }
         canvas { background: #12161f; border-radius: 50%; border: 4px solid #242b35; box-shadow: 0 0 30px rgba(0,0,0,0.7); }
         .info-label { position: absolute; top: 20px; font-size: 14px; font-weight: bold; color: #526273; letter-spacing: 1px; }
     </style>
 </head>
 <body>
-    <div class="panel team-panel">
-        <div class="team-title team-my">MÜTTEFİKLER (MY TEAM)</div>
-        <div id="myTeamList"></div>
+    <div class="top-bar">
+        <div id="bombStatus" class="bomb-alert">C4 DETONATOR: NO SIGNAL</div>
     </div>
-    <div class="panel center-panel">
-        <div class="info-label">TACTICAL REALTIME RADAR</div>
-        <canvas id="radar" width="520" height="520"></canvas>
-    </div>
-    <div class="panel team-panel" style="border-right: none;">
-        <div class="team-title team-enemy">RAKİPLER (ENEMIES)</div>
-        <div id="enemyTeamList"></div>
+    <div class="main-container">
+        <div class="panel team-panel">
+            <div class="team-title team-my">MÜTTEFİKLER (MY TEAM)</div>
+            <div id="myTeamList"></div>
+        </div>
+        <div class="panel center-panel">
+            <div class="info-label">TACTICAL REALTIME RADAR</div>
+            <canvas id="radar" width="520" height="520"></canvas>
+        </div>
+        <div class="panel team-panel" style="border-right: none;">
+            <div class="team-title team-enemy">RAKİPLER (ENEMIES)</div>
+            <div id="enemyTeamList"></div>
+        </div>
     </div>
     <script>
         const canvas = document.getElementById('radar');
         const ctx = canvas.getContext('2d');
         const center = canvas.width / 2;
-        const SCALE = 0.16;
+        const SCALE = 0.15; // Mesafe hassasiyet ayarı
 
         function drawRadarGrid() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -262,11 +289,12 @@ HTML_RADAR_UI = """
             ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
             ctx.stroke();
 
+            // Merkezdeki yerel oyuncu imleci (Yukarı sabit bakıyor, harita dönecek)
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
-            ctx.moveTo(center, center - 10);
-            ctx.lineTo(center - 7, center + 7);
-            ctx.lineTo(center + 7, center + 7);
+            ctx.moveTo(center, center - 12);
+            ctx.lineTo(center - 8, center + 6);
+            ctx.lineTo(center + 8, center + 6);
             ctx.closePath(); ctx.fill();
         }
 
@@ -278,16 +306,16 @@ HTML_RADAR_UI = """
             else if(player.health < 70) hpColor = '#f1c40f';
 
             return `
-                <div class="player-card ${statusClass}">
+                <div class="player-card \${statusClass}">
                     <div class="player-row">
-                        <span class="player-name">${player.name}</span>
-                        <span class="player-money">$${player.money}</span>
+                        <span class="player-name">\${player.name}</span>
+                        <span class="player-money">$\${player.money}</span>
                     </div>
                     <div class="player-row" style="font-size: 11px; color: #a0aab5;">
-                        <span>HP: ${player.health}</span>
+                        <span>HP: \${player.health}</span>
                     </div>
                     <div class="hp-bar-bg">
-                        <div class="hp-bar-fill" style="width: ${hpWidth}%; background-color: ${hpColor};"></div>
+                        <div class="hp-bar-fill" style="width: \${hpWidth}%; background-color: \${hpColor};"></div>
                     </div>
                 </div>
             `;
@@ -298,8 +326,20 @@ HTML_RADAR_UI = """
                 const response = await fetch('/data');
                 const data = await response.json();
                 
+                // Bomba Durum Çubuğu Güncellemesi
+                const bombEl = document.getElementById('bombStatus');
+                if (data.bomb_planted && data.bomb_time_left > 0) {
+                    bombEl.innerText = `⚠️ BOMBA KURULDU: \${data.bomb_time_left.toFixed(2)}s`;
+                    bombEl.className = "bomb-alert active";
+                } else {
+                    bombEl.innerText = "C4 DETONATOR: SİNYAL YOK / GÜVENLİ";
+                    bombEl.className = "bomb-alert";
+                }
+
                 drawRadarGrid();
-                const yawRad = (data.yaw * Math.PI) / 180;
+                
+                // Dönüş Mantığı: Yaw açısı radyana çevrilir (Eksen düzeltildi)
+                const viewAngleRad = ((data.yaw - 90) * Math.PI) / 180;
 
                 let myTeamHTML = "";
                 let enemyTeamHTML = "";
@@ -312,11 +352,12 @@ HTML_RADAR_UI = """
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        let rx = p.dx * Math.cos(-yawRad) - p.dy * Math.sin(-yawRad);
-                        let ry = p.dx * Math.sin(-yawRad) + p.dy * Math.cos(-yawRad);
+                        // Oyuncunun baktığı yöne göre haritayı/imleçleri döndürme hesabı
+                        let rx = p.dx * Math.cos(viewAngleRad) + p.dy * Math.sin(viewAngleRad);
+                        let ry = -p.dx * Math.sin(viewAngleRad) + p.dy * Math.cos(viewAngleRad);
 
                         let screenX = center + (rx * SCALE);
-                        let screenY = center - (ry * SCALE);
+                        let screenY = center + (ry * SCALE);
 
                         let dist = Math.sqrt(Math.pow(screenX - center, 2) + Math.pow(screenY - center, 2));
                         if (dist < center - 10) {
@@ -331,7 +372,7 @@ HTML_RADAR_UI = """
                 document.getElementById('enemyTeamList').innerHTML = enemyTeamHTML;
 
             } catch (e) { }
-            setTimeout(updateDashboard, 30);
+            setTimeout(updateDashboard, 20);
         }
         updateDashboard();
     </script>
@@ -349,7 +390,6 @@ def main():
             sys.stdout.flush()
             time.sleep(1)
 
-    # REZERVASYON DEĞİŞİKLİĞİ: Orijinal kernel32.OpenProcess yerine Indirect NtOpenProcess çağrısı
     handle = indirect_open_process(pid)
     if not handle:
         print("\n[-] Süreç baglantisi (Handle) alinmadi.")
@@ -360,15 +400,16 @@ def main():
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    print("[+] Taktiksel Veri Hafıza Motoru Çalısıyor... (Indirect Syscall)")
+    print("[+] Taktiksel Veri Hafıza Motoru Çalışıyor... (Indirect Syscall Onarımlı)")
 
     while True:
         try:
             EntityList = read_memory(handle, base + Offsets.dwEntityList, ctypes.c_uint64)
             localPlayerPawnAddr = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
             csgoInput = read_memory(handle, base + Offsets.dwCSGOInput, ctypes.c_uint64)
+            globalVars = read_memory(handle, base + Offsets.dwGlobalVars, ctypes.c_uint64)
             
-            if not localPlayerPawnAddr or not csgoInput:
+            if not localPlayerPawnAddr or not csgoInput or not globalVars:
                 time.sleep(0.1)
                 continue
                 
@@ -376,48 +417,15 @@ def main():
             local_pos = localPlayer.position
             local_team = localPlayer.team
             view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
+            current_time = read_memory(handle, globalVars + 0x2C, ctypes.c_float) # currentTime okuma
 
-            temp_players = []
-
-            for i in range(1, 64):
-                listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
-                if listEntry == 0: continue   
-                entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
-                if entity == 0: continue                          
-                entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
-                if entityCPawn == 0: continue   
-                listEntry2  = read_memory(handle, EntityList + 0x8 * ((entityCPawn & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
-                if listEntry2 == 0: continue 
-                entityPawn = read_memory(handle, listEntry2 + 112 * (entityCPawn & 0x1FF), ctypes.c_uint64)
-                if entityPawn == 0: continue 
-
-                player = Entity(handle, entity, entityPawn)
-                player_pos = player.position
-
-                is_local = (entityPawn == localPlayerPawnAddr)
-
-                temp_players.append({
-                    "name": player.name,
-                    "health": player.health,
-                    "money": player.money,
-                    "team": player.team,
-                    "is_local": is_local,
-                    "dx": player_pos["x"] - local_pos["x"],
-                    "dy": player_pos["y"] - local_pos["y"]
-                })
-
-            radar_data = {
-                "yaw": view_angles_y,
-                "local_team": local_team,
-                "players": temp_players
-            }
+            # --- Bomba Süresi Mantığı ---
+            bomb_planted = False
+            bomb_time_left = 0.0
+            planted_c4_base = read_memory(handle, base + Offsets.dwPlantedC4, ctypes.c_uint64)
             
-            time.sleep(0.02)
+            if planted_c4_base:
+                planted_c4 = read_memory(handle, planted_c4_base, ctypes.c_uint64)
+                if planted_c4:
+                    is_planted = read_memory(handle, planted_c4 + Offsets.m_bBombPlanted, ctypes.c_bool)
                 
-        except Exception:
-            time.sleep(0.1)
-            continue
-
-if __name__ == "__main__":
-    main()
-    
