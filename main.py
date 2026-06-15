@@ -389,7 +389,7 @@ HTML_RADAR_UI = """
 </html>
 """
 
-# --- ANA DÖNGÜ (HATASIZ TAMAMLANAN KISIM) ---
+# --- ANA MOTOR DÖNGÜSÜ ---
 def main():
     global radar_data
     pid = None
@@ -430,11 +430,12 @@ def main():
             temp_players = []
 
             for i in range(1, 64):
-                # Yarım kalan döngü mantığının hatasız tamamlanması:
                 listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
                 if listEntry == 0: continue   
                 
                 entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
                 if entity == 0: continue                          
                 
-                entityCPawn = read_memory(handle, entity + Offsets.m_hPlaye
+                # Hatalı olan m_hPlaye parantez kaçırma problemi tam olarak düzeltildi:
+                entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
+                
