@@ -4,6 +4,7 @@ import math
 import ctypes
 from ctypes import wintypes
 from multiprocessing.managers import BaseManager
+import threading
 
 # --- Windows Hafıza Okuma API Yapılandırması (Indirect Syscall) ---
 kernel32 = ctypes.windll.kernel32
@@ -183,77 +184,92 @@ class Entity:
         if "weapon_" in full_name: return full_name.replace("weapon_", "").upper()
         return full_name.upper()
 
-# --- IPC Veri Paylaşım Sunucusu Kurulumu ---
-shared_data = {"yaw": 0, "local_team": 0, "players": []}
+# --- Küresel Paylaşılan Veri Havuzu ---
+shared_container = {"data": {"yaw": 0, "local_team": 0, "players": []}}
 
-def get_shared_data():
-    return shared_data
+def get_radar_data():
+    return shared_container["data"]
 
 class TokenManager(BaseManager): pass
 
-def main():
-    global shared_data
-    TokenManager.register('get_radar_data', callable=get_shared_data)
-    manager = TokenManager(address=('127.0.0.1', 50001), authkey=b'radar_secret')
-    manager.start()
-    print("[+] IPC Veri Havuzu Port 50001 uzerinde baslatildi.")
-
-    pid = None
-    while pid is None:
+def memory_loop():
+    print("[*] Hafiza Tarama Dongusu Baslatildi.")
+    while True:
         pid = get_process_id("cs2.exe")
         if pid is None:
-            sys.stdout.write("\r[ Waiting ] cs2.exe bekleniyor... \x1b[K")
-            sys.stdout.flush()
-            time.sleep(1)
-
-    handle = indirect_open_process(pid)
-    if not handle: return
-    base = get_module_base(pid, "client.dll")
-    if not base: return
-
-    print("\n[+] Taktiksel Hafiza Motoru Aktif.")
-    
-    try:
-        while True:
-            EntityList = read_memory(handle, base + Offsets.dwEntityList, ctypes.c_uint64)
-            local_player_pawn = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
+            # Oyun kapalıyken havuzu temizle ve bekle
+            shared_container["data"] = {"yaw": 0, "local_team": 0, "players": []}
+            time.sleep(2)
+            continue
             
-            if local_player_pawn and EntityList:
-                local_team = read_memory(handle, local_player_pawn + Offsets.m_iTeamNum, ctypes.c_int)
-                local_pos = read_vec3(handle, local_player_pawn + Offsets.m_vOldOrigin)
-                local_yaw = read_memory(handle, local_player_pawn + Offsets.m_angEyeAngles + 4, ctypes.c_float)
+        handle = indirect_open_process(pid)
+        if not handle:
+            time.sleep(1)
+            continue
+            
+        base = get_module_base(pid, "client.dll")
+        if not base:
+            kernel32.CloseHandle(handle)
+            time.sleep(1)
+            continue
+
+        print(f"[+] CS2 Yakalandi! PID: {pid} | client.dll: {hex(base)}")
+
+        while True:
+            try:
+                EntityList = read_memory(handle, base + Offsets.dwEntityList, ctypes.c_uint64)
+                local_player_pawn = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
                 
-                temp_players = []
-                for i in range(1, 64):
-                    listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
-                    if listEntry == 0: continue   
-                    entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
-                    if entity == 0: continue                          
-                    entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
-                    if entityCPawn == 0: continue   
-                    listEntry2 = read_memory(handle, EntityList + 0x8 * ((entityCPawn & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
-                    if listEntry2 == 0: continue 
-                    entityPawn = read_memory(handle, listEntry2 + 112 * (entityCPawn & 0x1FF), ctypes.c_uint64)
-                    if entityPawn == 0: continue 
+                if local_player_pawn and EntityList:
+                    local_team = read_memory(handle, local_player_pawn + Offsets.m_iTeamNum, ctypes.c_int)
+                    local_pos = read_vec3(handle, local_player_pawn + Offsets.m_vOldOrigin)
+                    local_yaw = read_memory(handle, local_player_pawn + Offsets.m_angEyeAngles + 4, ctypes.c_float)
+                    
+                    temp_players = []
+                    for i in range(1, 64):
+                        listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
+                        if listEntry == 0: continue   
+                        entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
+                        if entity == 0: continue                          
+                        entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
+                        if entityCPawn == 0: continue   
+                        listEntry2 = read_memory(handle, EntityList + 0x8 * ((entityCPawn & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
+                        if listEntry2 == 0: continue 
+                        entityPawn = read_memory(handle, listEntry2 + 112 * (entityCPawn & 0x1FF), ctypes.c_uint64)
+                        if entityPawn == 0: continue 
 
-                    player = Entity(handle, entity, entityPawn, EntityList)
-                    player_pos = player.position
-                    is_local = (entityPawn == local_player_pawn)
+                        player = Entity(handle, entity, entityPawn, EntityList)
+                        player_pos = player.position
+                        is_local = (entityPawn == local_player_pawn)
 
-                    temp_players.append({
-                        "name": player.name, "health": player.health, "money": player.money,
-                        "weapon": player.weapon, "team": player.team, "yaw": player.yaw,
-                        "is_local": is_local, "dx": player_pos["x"] - local_pos["x"], "dy": player_pos["y"] - local_pos["y"]
-                    })
+                        temp_players.append({
+                            "name": player.name, "health": player.health, "money": player.money,
+                            "weapon": player.weapon, "team": player.team, "yaw": player.yaw,
+                            "is_local": is_local, "dx": player_pos["x"] - local_pos["x"], "dy": player_pos["y"] - local_pos["y"]
+                        })
 
-                # Paylaşılan veriyi güvenli bir şekilde güncelle
-                shared_data.update({
-                    "yaw": local_yaw, "local_team": local_team, "players": temp_players
-                })
-            time.sleep(0.015)
-    except KeyboardInterrupt:
-        print("\n[-] Motor Durduruldu.")
+                    shared_container["data"] = {
+                        "yaw": local_yaw, "local_team": local_team, "players": temp_players
+                    }
+                time.sleep(0.015)
+            except Exception as e:
+                print(f"[-] Okuma hatasi, yeniden baglaniliyor: {e}")
+                break
+                
+        kernel32.CloseHandle(handle)
+
+def main():
+    print("[*] radar_server.py baslatiliyor...")
+    TokenManager.register('get_radar_data', callable=get_radar_data)
+    manager = TokenManager(address=('127.0.0.1', 50001), authkey=b'radar_secret')
+    
+    # Motoru asenkron bir thread olarak arka planda çalıştırıyoruz (Kilitlenmeyi önler)
+    t = threading.Thread(target=memory_loop, daemon=True)
+    t.start()
+    
+    print("[+] IPC Sunucusu Port 50001 uzerinde aktif.")
+    manager.get_server().serve_forever()
 
 if __name__ == "__main__":
     main()
-
+    
