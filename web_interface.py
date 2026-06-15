@@ -3,9 +3,9 @@ import socketserver
 import json
 import sys
 import os
+import time
 from multiprocessing.managers import BaseManager
 
-# PyInstaller geçici klasör dizini kontrolü (EXE olarak çalışırken burayı kullanır)
 if getattr(sys, 'frozen', False):
     base_path = sys._MEIPASS
 else:
@@ -14,13 +14,21 @@ else:
 class TokenManager(BaseManager): pass
 TokenManager.register('get_radar_data')
 
-try:
-    manager = TokenManager(address=('127.0.0.1', 50001), authkey=b'radar_secret')
-    manager.connect()
-    remote_radar_data = manager.get_radar_data()
-    print("[+] Radar Veri Motoruna Basariyla Baglanildi.")
-except Exception as e:
-    print("[-] Hata: 'radar_server.py' acik degil! Once motoru baslatmalisin.")
+remote_radar_data = None
+
+print("[*] Veri motoruna baglanilmaya calisiliyor...")
+for _ in range(10):
+    try:
+        manager = TokenManager(address=('127.0.0.1', 50001), authkey=b'radar_secret')
+        manager.connect()
+        remote_radar_data = manager.get_radar_data()
+        print("[+] Radar Veri Motoruna Basariyla Baglanildi.")
+        break
+    except Exception:
+        time.sleep(0.5)
+
+if remote_radar_data is None:
+    print("[-] Kritik Hata: 'radar_server.py' bulunamadi! Once onu calistirmalisiniz.")
     sys.exit(1)
 
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
@@ -31,8 +39,12 @@ class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            local_dict = dict(remote_radar_data)
-            self.wfile.write(json.dumps(local_dict).encode('utf-8'))
+            try:
+                # Motorun proxy datasını güvenle sözlüğe çevirip gönder
+                local_dict = dict(remote_radar_data)
+                self.wfile.write(json.dumps(local_dict).encode('utf-8'))
+            except Exception:
+                self.wfile.write(json.dumps({"yaw": 0, "local_team": 0, "players": []}).encode('utf-8'))
         elif self.path == '/' or self.path == '/index.html':
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -195,9 +207,12 @@ HTML_RADAR_UI = """
 def run_web_server():
     PORT = 8000
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
-        print(f"[+] Web Arayuzu Baslatildi: http://localhost:{PORT}")
-        httpd.serve_forever()
+    try:
+        with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
+            print(f"[+] Web Sunucusu Baslatildi! Tarayicinizdan girin: http://localhost:{PORT}")
+            httpd.serve_forever()
+    except Exception as e:
+        print(f"[-] Sunucu baslatilamadi (Port meşgul olabilir): {e}")
 
 if __name__ == "__main__":
     run_web_server()
