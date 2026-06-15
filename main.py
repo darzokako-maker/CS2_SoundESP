@@ -361,17 +361,17 @@ HTML_RADAR_UI = """<!DOCTYPE html>
             else if(player.health < 70) hpColor = '#f1c40f';
 
             return `
-                <div class="player-card \${statusClass}">
+                <div class="player-card ${statusClass}">
                     <div class="player-row">
-                        <span class="player-name">\${player.name}</span>
-                        <span class="player-money">$\${player.money}</span>
+                        <span class="player-name">${player.name}</span>
+                        <span class="player-money">$${player.money}</span>
                     </div>
                     <div class="player-row" style="font-size: 11px; color: #a0aab5;">
-                        <span>HP: \${player.health}</span>
-                        <span class="player-weapon">\${player.health > 0 ? player.weapon : 'DEAD'}</span>
+                        <span>HP: ${player.health}</span>
+                        <span class="player-weapon">${player.health > 0 ? player.weapon : 'DEAD'}</span>
                     </div>
                     <div class="hp-bar-bg">
-                        <div class="hp-bar-fill" style="width: \${hpWidth}%; background-color: \${hpColor};"></div>
+                        <div class="hp-bar-fill" style="width: ${hpWidth}%; background-color: ${hpColor};"></div>
                     </div>
                 </div>
             `;
@@ -396,5 +396,5 @@ HTML_RADAR_UI = """<!DOCTYPE html>
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        let rx = p.dx * Math.cos(-localYawRad) - p.dy * Math.sin(-localYawRad);
-                        let ry = p.dx * Math.sin(-localYawRad)
+                        // CS2 koordinat düzlemini radar açısına göre döndürme (X=Sağ, Y=Yukarı mantığı için -dy kullanılır)
+                        let rx = p.dx * 
