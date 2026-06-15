@@ -5,19 +5,21 @@ import ctypes
 from ctypes import wintypes
 import http.server
 import socketserver
-import json
 import threading
+import json
 
-# ==============================================================================
-# 1. WINDOWS HAFIZA OKUMA API YAPILANDIRMASI (INDIRECT SYSCALL)
-# ==============================================================================
+# --- Windows Hafıza Okuma API Yapılandırması (Indirect Syscall) ---
 kernel32 = ctypes.windll.kernel32
+
 kernel32.VirtualAlloc.restype = ctypes.c_void_p
 kernel32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
+
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+
 kernel32.GetProcAddress.restype = ctypes.c_void_p
 kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
+
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 
@@ -48,13 +50,16 @@ class MODULEENTRY32(ctypes.Structure):
 def _get_ntdll_syscall_address():
     h_ntdll = kernel32.GetModuleHandleW("ntdll.dll")
     nt_read_addr = kernel32.GetProcAddress(h_ntdll, b"NtReadVirtualMemory")
-    if not nt_read_addr: return 0
+    if not nt_read_addr:
+        return 0
     for offset in range(0, 100):
         ptr = nt_read_addr + offset
-        if ctypes.string_at(ptr, 2) == b"\x0F\x05": return ptr
+        if ctypes.string_at(ptr, 2) == b"\x0F\x05":
+            return ptr
     return nt_read_addr + 0x12
 
 _LEGAL_SYSCALL_ADDR = _get_ntdll_syscall_address()
+
 _op_shellcode = b"\x4C\x8B\xD1\xB8\x26\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 _rvm_shellcode = b"\x4C\x8B\xD1\xB8\x3F\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 
@@ -75,11 +80,13 @@ def indirect_open_process(pid):
     return None
 
 def get_process_id(process_name):
-    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    TH32CS_SNAPPROCESS = 0x00000002
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     pe = PROCESSENTRY32()
     pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
     kernel32.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
     kernel32.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
+    
     if kernel32.Process32First(snapshot, ctypes.byref(pe)):
         while kernel32.Process32Next(snapshot, ctypes.byref(pe)):
             if pe.szExeFile.decode('utf-8', errors='ignore').lower() == process_name.lower():
@@ -89,11 +96,13 @@ def get_process_id(process_name):
     return None
 
 def get_module_base(pid, module_name):
-    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000008, pid)
+    TH32CS_SNAPMODULE = 0x00000008
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid)
     me = MODULEENTRY32()
     me.dwSize = ctypes.sizeof(MODULEENTRY32)
     kernel32.Module32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
     kernel32.Module32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
+    
     if kernel32.Module32First(snapshot, ctypes.byref(me)):
         while kernel32.Module32Next(snapshot, ctypes.byref(me)):
             if me.szModule.decode('utf-8', errors='ignore').lower() == module_name.lower():
@@ -114,8 +123,10 @@ def read_string(handle, address, max_len=32):
     buffer = ctypes.create_string_buffer(max_len)
     bytes_read = ctypes.c_size_t()
     if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), max_len, ctypes.byref(bytes_read)) == 0:
-        try: return buffer.value.decode('utf-8', errors='ignore')
-        except: return "Unknown"
+        try:
+            return buffer.value.decode('utf-8', errors='ignore')
+        except:
+            return "Unknown"
     return "Unknown"
 
 def read_vec3(handle, address):
@@ -127,9 +138,12 @@ def read_vec3(handle, address):
         return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
     return {"x": 0, "y": 0, "z": 0}
 
+# --- 2026 Ofsetleri ---
 class Offsets: 
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
+    dwCSGOInput = 0x2356240        
+    
     m_iTeamNum = 0x3EB             
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
@@ -137,18 +151,13 @@ class Offsets:
     m_iszPlayerName = 0x638        
     m_pInGameMoneyServices = 0x6F8 
     m_iAccount = 0x40              
-    m_angEyeAngles = 0x14F8        
-    m_pWeaponServices = 0x1100     
-    m_hActiveWeapon = 0x58         
-    m_pClippingWeaponData = 0x368  
-    m_szName = 0xC10               
+    m_angEyeAngles = 0x14F8        # Oyuncuların bakış açısı (Yön Okları İçin)
 
 class Entity:
-    def __init__(self, handle, controller, pawn, entity_list_base=0):
+    def __init__(self, handle, controller, pawn):
         self.handle = handle
         self.controller = controller
         self.pawn = pawn
-        self.entity_list = entity_list_base
     
     @property
     def team(self): return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
@@ -164,122 +173,22 @@ class Entity:
         return read_string(self.handle, self.controller + Offsets.m_iszPlayerName, 32)
     @property
     def money(self):
-        if not self.controller: return 0
-        money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
+        if not self.pawn: return 0
+        money_services = read_memory(self.handle, self.pawn + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
-    @property
-    def weapon(self):
-        if not self.pawn or not self.entity_list: return "None"
-        wpn_services = read_memory(self.handle, self.pawn + Offsets.m_pWeaponServices, ctypes.c_uint64)
-        if not wpn_services: return "None"
-        active_wpn_handle = read_memory(self.handle, wpn_services + Offsets.m_hActiveWeapon, ctypes.c_uint32)
-        if active_wpn_handle == 0xFFFFFFFF: return "Knife"
-        wpn_idx = active_wpn_handle & 0x7FFF
-        list_entry = read_memory(self.handle, self.entity_list + (8 * (wpn_idx >> 9)) + 16, ctypes.c_uint64)
-        if not list_entry: return "Knife"
-        wpn_entity = read_memory(self.handle, list_entry + 120 * (wpn_idx & 0x1FF), ctypes.c_uint64)
-        if not wpn_entity: return "Knife"
-        wpn_data = read_memory(self.handle, wpn_entity + Offsets.m_pClippingWeaponData, ctypes.c_uint64)
-        if not wpn_data: return "Knife"
-        wpn_name_ptr = read_memory(self.handle, wpn_data + Offsets.m_szName, ctypes.c_uint64)
-        if not wpn_name_ptr: return "Knife"
-        full_name = read_string(self.handle, wpn_name_ptr, 32)
-        if "weapon_" in full_name: return full_name.replace("weapon_", "").upper()
-        return full_name.upper()
 
-# ==============================================================================
-# 2. DOĞRUDAN BELLEK İÇİ VERİ PAYLAŞIM ALANI (LOCK-FREE GLOBAL DICT)
-# ==============================================================================
-global_radar_data = {"yaw": 0, "local_team": 0, "players": []}
-data_lock = threading.Lock()
+radar_data = {"yaw": 0, "local_team": 0, "players": []}
 
-# ==============================================================================
-# 3. KİLİTLENMEYEN ASENKRON HAFIZA TARAMA MOTORU
-# ==============================================================================
-def memory_scanner_thread():
-    global global_radar_data
-    print("[+] Hafiza motoru thread yapisi basariyla tetiklendi.")
-    
-    while True:
-        pid = get_process_id("cs2.exe")
-        if pid is None:
-            with data_lock:
-                global_radar_data = {"yaw": 0, "local_team": 0, "players": []}
-            time.sleep(2)
-            continue
-            
-        handle = indirect_open_process(pid)
-        if not handle:
-            time.sleep(1)
-            continue
-            
-        base = get_module_base(pid, "client.dll")
-        if not base:
-            kernel32.CloseHandle(handle)
-            time.sleep(1)
-            continue
-
-        print(f"\n[+] CS2 BAGLANTISI VE AKTIF HAFIZA OKUMA OK! PID: {pid}")
-
-        while True:
-            try:
-                EntityList = read_memory(handle, base + Offsets.dwEntityList, ctypes.c_uint64)
-                local_player_pawn = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
-                
-                if local_player_pawn and EntityList:
-                    local_team = read_memory(handle, local_player_pawn + Offsets.m_iTeamNum, ctypes.c_int)
-                    local_pos = read_vec3(handle, local_player_pawn + Offsets.m_vOldOrigin)
-                    local_yaw = read_memory(handle, local_player_pawn + Offsets.m_angEyeAngles + 4, ctypes.c_float)
-                    
-                    temp_players = []
-                    for i in range(1, 64):
-                        listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
-                        if listEntry == 0: continue   
-                        entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
-                        if entity == 0: continue                          
-                        entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
-                        if entityCPawn == 0: continue   
-                        listEntry2 = read_memory(handle, EntityList + 0x8 * ((entityCPawn & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
-                        if listEntry2 == 0: continue 
-                        entityPawn = read_memory(handle, listEntry2 + 112 * (entityCPawn & 0x1FF), ctypes.c_uint64)
-                        if entityPawn == 0: continue 
-
-                        player = Entity(handle, entity, entityPawn, EntityList)
-                        player_pos = player.position
-                        is_local = (entityPawn == local_player_pawn)
-
-                        temp_players.append({
-                            "name": player.name, "health": player.health, "money": player.money,
-                            "weapon": player.weapon, "team": player.team, "yaw": player.yaw,
-                            "is_local": is_local, "dx": player_pos["x"] - local_pos["x"], "dy": player_pos["y"] - local_pos["y"]
-                        })
-
-                    with data_lock:
-                        global_radar_data = {
-                            "yaw": local_yaw, "local_team": local_team, "players": temp_players
-                        }
-                time.sleep(0.015)
-            except Exception:
-                break
-                
-        kernel32.CloseHandle(handle)
-        print("[-] CS2 Kapatildi veya Hafiza Kesildi. Yeniden araniyor...")
-
-# ==============================================================================
-# 4. HATA TOLERANSLI WEB SUNUCUSU
-# ==============================================================================
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args): return
     def do_GET(self):
-        global global_radar_data
         if self.path == '/data':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
-            with data_lock:
-                self.wfile.write(json.dumps(global_radar_data).encode('utf-8'))
+            self.wfile.write(json.dumps(radar_data).encode('utf-8'))
         elif self.path == '/' or self.path == '/index.html':
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -288,8 +197,15 @@ class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(404)
 
-# --- WEB PANEL ARAYÜZÜ (HTML & JAVASCRIPT BÜTÜNÜ) ---
-HTML_RADAR_UI = """<!DOCTYPE html>
+def run_web_server():
+    PORT = 8000
+    with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
+        print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
+        httpd.serve_forever()
+
+# --- 3 BÖLMELİ HTML5 & CSS3 VE YÖN OKLU RADAR ARAYÜZÜ ---
+HTML_RADAR_UI = """
+<!DOCTYPE html>
 <html>
 <head>
     <title>CS2 Tactical Web Dashboard</title>
@@ -304,9 +220,8 @@ HTML_RADAR_UI = """<!DOCTYPE html>
         .player-card.alive { border-left-color: #44ff44; }
         .player-card.dead { border-left-color: #ff4444; opacity: 0.4; }
         .player-row { display: flex; justify-content: space-between; align-items: center; }
-        .player-name { font-weight: bold; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .player-money { color: #2ecc71; font-weight: bold; font-family: monospace; font-size: 14px; }
-        .player-weapon { color: #f39c12; font-size: 12px; font-weight: bold; font-family: monospace; }
+        .player-name { font-weight: bold; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .player-money { color: #2ecc71; font-weight: bold; font-family: monospace; }
         .hp-bar-bg { width: 100%; background: #222; height: 6px; border-radius: 3px; overflow: hidden; }
         .hp-bar-fill { height: 100%; background: #2ecc71; transition: width 0.1s; }
         .center-panel { width: 44%; display: flex; justify-content: center; align-items: center; position: relative; background: #0d1017; }
@@ -345,6 +260,7 @@ HTML_RADAR_UI = """<!DOCTYPE html>
             ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
             ctx.stroke();
 
+            // Merkez Oyuncu (Sen) - Her zaman tam yukarı bakar
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
             ctx.moveTo(center, center - 13);
@@ -368,7 +284,6 @@ HTML_RADAR_UI = """<!DOCTYPE html>
                     </div>
                     <div class="player-row" style="font-size: 11px; color: #a0aab5;">
                         <span>HP: ${player.health}</span>
-                        <span class="player-weapon">${player.health > 0 ? player.weapon : 'DEAD'}</span>
                     </div>
                     <div class="hp-bar-bg">
                         <div class="hp-bar-fill" style="width: ${hpWidth}%; background-color: ${hpColor};"></div>
@@ -383,6 +298,8 @@ HTML_RADAR_UI = """<!DOCTYPE html>
                 const data = await response.json();
                 
                 drawRadarGrid();
+                
+                // Kendi açımız (Radyan)
                 const localYawRad = (data.yaw * Math.PI) / 180;
 
                 let myTeamHTML = "";
@@ -396,5 +313,128 @@ HTML_RADAR_UI = """<!DOCTYPE html>
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        // CS2 koordinat düzlemini radar açısına göre döndürme (X=Sağ, Y=Yukarı mantığı için -dy kullanılır)
-                        let rx = p.dx * 
+                        // Haritayı senin baktığın yöne göre döndürme matrisi
+                        let rx = p.dx * Math.cos(-localYawRad) - p.dy * Math.sin(-localYawRad);
+                        let ry = p.dx * Math.sin(-localYawRad) + p.dy * Math.cos(-localYawRad);
+
+                        let screenX = center + (rx * SCALE);
+                        let screenY = center - (ry * SCALE);
+
+                        let dist = Math.sqrt(Math.pow(screenX - center, 2) + Math.pow(screenY - center, 2));
+                        if (dist < center - 10) {
+                            
+                            // --- YÖN ÇİZGİSİ HESAPLAMA (GÖZ AÇISINA GÖRE) ---
+                            // Düşmanın dünya açısını, senin kendi açına göre bağıl hale getiriyoruz
+                            let relativeYaw = ((p.yaw - data.yaw) * Math.PI) / 180;
+                            
+                            let color = p.team === data.local_team ? '#00ffcc' : '#ff4444';
+                            
+                            // Oyuncunun Kafasından Çıkan Bakış Çizgisi
+                            ctx.strokeStyle = color;
+                            ctx.lineWidth = 2.5;
+                            ctx.beginPath();
+                            ctx.moveTo(screenX, screenY);
+                            
+                            // 15 piksel uzunluğunda kusursuz yön oku çizgisi
+                            let lineLength = 15;
+                            let targetX = screenX + Math.sin(relativeYaw) * lineLength;
+                            let targetY = screenY - Math.cos(relativeYaw) * lineLength;
+                            ctx.lineTo(targetX, targetY);
+                            ctx.stroke();
+
+                            // Oyuncu Gövde Noktası
+                            ctx.fillStyle = color;
+                            ctx.beginPath(); 
+                            ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI); 
+                            ctx.fill();
+                            ctx.strokeStyle = '#ffffff'; 
+                            ctx.lineWidth = 1.5; 
+                            ctx.stroke();
+                        }
+                    }
+                });
+
+                document.getElementById('myTeamList').innerHTML = myTeamHTML;
+                document.getElementById('enemyTeamList').innerHTML = enemyTeamHTML;
+
+            } catch (e) { }
+            setTimeout(updateDashboard, 30);
+        }
+        updateDashboard();
+    </script>
+</body>
+</html>
+"""
+
+def main():
+    global radar_data
+    pid = None
+    while pid is None:
+        pid = get_process_id("cs2.exe")
+        if pid is None:
+            sys.stdout.write("\r[ Waiting ] cs2.exe bekleniyor... \x1b[K")
+            sys.stdout.flush()
+            time.sleep(1)
+
+    handle = indirect_open_process(pid)
+    if not handle:
+        print("\n[-] Süreç baglantisi (Handle) alinmadi.")
+        return
+        
+    base = get_module_base(pid, "client.dll")
+
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+
+    print("[+] Taktiksel Veri Hafıza Motoru Çalısıyor... (Indirect Syscall)")
+
+    while True:
+        try:
+            EntityList = read_memory(handle, base + Offsets.dwEntityList, ctypes.c_uint64)
+            localPlayerPawnAddr = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
+            csgoInput = read_memory(handle, base + Offsets.dwCSGOInput, ctypes.c_uint64)
+            
+            if not localPlayerPawnAddr or not csgoInput:
+                time.sleep(0.1)
+                continue
+                
+            localPlayer = Entity(handle, 0, localPlayerPawnAddr)
+            local_pos = localPlayer.position
+            local_team = localPlayer.team
+            view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
+
+            temp_players = []
+
+            for i in range(1, 64):
+                listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
+                if listEntry == 0: continue   
+                entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
+                if entity == 0: continue                          
+                entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
+                if entityCPawn == 0: continue   
+                listEntry2  = read_memory(handle, EntityList + 0x8 * ((entityCPawn & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
+                if listEntry2 == 0: continue 
+                entityPawn = read_memory(handle, listEntry2 + 112 * (entityCPawn & 0x1FF), ctypes.c_uint64)
+                if entityPawn == 0: continue 
+
+                player = Entity(handle, entity, entityPawn)
+                player_pos = player.position
+
+                is_local = (entityPawn == localPlayerPawnAddr)
+
+                temp_players.append({
+                    "name": player.name,
+                    "health": player.health,
+                    "money": player.money,
+                    "team": player.team,
+                    "yaw": player.yaw, # Bireysel yön açısını köprüye ekledik
+                    "is_local": is_local,
+                    "dx": player_pos["x"] - local_pos["x"],
+                    "dy": player_pos["y"] - local_pos["y"]
+                })
+
+            radar_data = {
+                "yaw": view_angles_y,
+                "local_team": local_team,
+                "players": temp_players
+           
