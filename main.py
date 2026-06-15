@@ -8,7 +8,7 @@ import socketserver
 import threading
 import json
 
-# --- Windows Hafıza Okuma API Yapılandırması (64-bit Onarımlı) ---
+# --- Windows Hafıza Okuma API Yapılandırması (Indirect Syscall) ---
 kernel32 = ctypes.windll.kernel32
 
 kernel32.VirtualAlloc.restype = ctypes.c_void_p
@@ -23,7 +23,6 @@ kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 
-# Global C-Struct Tanımlamaları (Hizalama ve Çökmeleri Önlemek İçin Globalde)
 class CLIENT_ID(ctypes.Structure):
     _fields_ = [("UniqueProcess", wintypes.HANDLE), ("UniqueThread", wintypes.HANDLE)]
 
@@ -48,7 +47,6 @@ class MODULEENTRY32(ctypes.Structure):
         ("modBaseSize", wintypes.DWORD), ("hModule", wintypes.HANDLE), ("szModule", ctypes.c_char * 256), ("szExePath", ctypes.c_char * 260)
     ]
 
-# --- MEŞRU SYSCALL BULUCU VE ASSEMBLY KÖPRÜLERİ ---
 def _get_ntdll_syscall_address():
     h_ntdll = kernel32.GetModuleHandleW("ntdll.dll")
     nt_read_addr = kernel32.GetProcAddress(h_ntdll, b"NtReadVirtualMemory")
@@ -62,7 +60,6 @@ def _get_ntdll_syscall_address():
 
 _LEGAL_SYSCALL_ADDR = _get_ntdll_syscall_address()
 
-# NtOpenProcess (Syscall ID: 0x0026) & NtReadVirtualMemory (Syscall ID: 0x003F)
 _op_shellcode = b"\x4C\x8B\xD1\xB8\x26\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 _rvm_shellcode = b"\x4C\x8B\xD1\xB8\x3F\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 
@@ -82,7 +79,6 @@ def indirect_open_process(pid):
         return handle.value
     return None
 
-# --- Orijinal Fonksiyon Yapılarının Indirect Sürümleri ---
 def get_process_id(process_name):
     TH32CS_SNAPPROCESS = 0x00000002
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -116,7 +112,6 @@ def get_module_base(pid, module_name):
     kernel32.CloseHandle(snapshot)
     return None
 
-# API yerine Indirect Çağrı kullanan hafıza okuma fonksiyonları
 def read_memory(handle, address, c_type):
     buffer = c_type()
     bytes_read = ctypes.c_size_t()
@@ -148,6 +143,7 @@ class Offsets:
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
     dwCSGOInput = 0x2356240        
+    
     m_iTeamNum = 0x3EB             
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
@@ -155,12 +151,20 @@ class Offsets:
     m_iszPlayerName = 0x638        
     m_pInGameMoneyServices = 0x6F8 
     m_iAccount = 0x40              
+    m_angEyeAngles = 0x14F8        
+    
+    # Silah Okuma İçin Gerekli Olan Ofsetler
+    m_pWeaponServices = 0x1100     
+    m_hActiveWeapon = 0x58         
+    m_pClippingWeaponData = 0x368  
+    m_szName = 0xC10               
 
 class Entity:
-    def __init__(self, handle, controller, pawn):
+    def __init__(self, handle, controller, pawn, entity_list_base=0):
         self.handle = handle
         self.controller = controller
         self.pawn = pawn
+        self.entity_list = entity_list_base
     
     @property
     def team(self): return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
@@ -169,17 +173,45 @@ class Entity:
     @property
     def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
     @property
+    def yaw(self): return read_memory(self.handle, self.pawn + Offsets.m_angEyeAngles + 4, ctypes.c_float)
+    @property
     def name(self):
         if not self.controller: return "Player"
         return read_string(self.handle, self.controller + Offsets.m_iszPlayerName, 32)
+    
     @property
     def money(self):
         if not self.pawn: return 0
-        money_services = read_memory(self.handle, self.pawn + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
+        # Parayı Pawn üzerinden değil, Controller üzerinden okumak daha kararlıdır.
+        money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
-# Global Veri Köprüsü
+    @property
+    def weapon(self):
+        if not self.pawn or not self.entity_list: return "None"
+        wpn_services = read_memory(self.handle, self.pawn + Offsets.m_pWeaponServices, ctypes.c_uint64)
+        if not wpn_services: return "None"
+        active_wpn_handle = read_memory(self.handle, wpn_services + Offsets.m_hActiveWeapon, ctypes.c_uint32)
+        if active_wpn_handle == 0xFFFFFFFF: return "Knife"
+        
+        # Handle değerinden Entity indeksini çözme
+        wpn_idx = active_wpn_handle & 0x7FFF
+        list_entry = read_memory(self.handle, self.entity_list + (8 * (wpn_idx >> 9)) + 16, ctypes.c_uint64)
+        if not list_entry: return "Knife"
+        wpn_entity = read_memory(self.handle, list_entry + 120 * (wpn_idx & 0x1FF), ctypes.c_uint64)
+        if not wpn_entity: return "Knife"
+        
+        wpn_data = read_memory(self.handle, wpn_entity + Offsets.m_pClippingWeaponData, ctypes.c_uint64)
+        if not wpn_data: return "Knife"
+        wpn_name_ptr = read_memory(self.handle, wpn_data + Offsets.m_szName, ctypes.c_uint64)
+        if not wpn_name_ptr: return "Knife"
+        
+        full_name = read_string(self.handle, wpn_name_ptr, 32)
+        if "weapon_" in full_name:
+            return full_name.replace("weapon_", "").upper()
+        return full_name.upper()
+
 radar_data = {"yaw": 0, "local_team": 0, "players": []}
 
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
@@ -205,7 +237,7 @@ def run_web_server():
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- 3 BÖLMELİ HTML5 & CSS3 ARAYÜZÜ (DEĞİŞTİRİLMEDİ) ---
+# --- GELİŞTİRİLMİŞ PANEL ARAYÜZÜ (SİLAH VE PARA DESTEKLİ) ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -222,8 +254,9 @@ HTML_RADAR_UI = """
         .player-card.alive { border-left-color: #44ff44; }
         .player-card.dead { border-left-color: #ff4444; opacity: 0.4; }
         .player-row { display: flex; justify-content: space-between; align-items: center; }
-        .player-name { font-weight: bold; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .player-money { color: #2ecc71; font-weight: bold; font-family: monospace; }
+        .player-name { font-weight: bold; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .player-money { color: #2ecc71; font-weight: bold; font-family: monospace; font-size: 14px; }
+        .player-weapon { color: #f39c12; font-size: 12px; font-weight: bold; font-family: monospace; }
         .hp-bar-bg { width: 100%; background: #222; height: 6px; border-radius: 3px; overflow: hidden; }
         .hp-bar-fill { height: 100%; background: #2ecc71; transition: width 0.1s; }
         .center-panel { width: 44%; display: flex; justify-content: center; align-items: center; position: relative; background: #0d1017; }
@@ -262,11 +295,12 @@ HTML_RADAR_UI = """
             ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
             ctx.stroke();
 
+            // Merkez Oyuncu Simgesi
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
-            ctx.moveTo(center, center - 10);
-            ctx.lineTo(center - 7, center + 7);
-            ctx.lineTo(center + 7, center + 7);
+            ctx.moveTo(center, center - 13);
+            ctx.lineTo(center - 8, center + 6);
+            ctx.lineTo(center + 8, center + 6);
             ctx.closePath(); ctx.fill();
         }
 
@@ -285,6 +319,7 @@ HTML_RADAR_UI = """
                     </div>
                     <div class="player-row" style="font-size: 11px; color: #a0aab5;">
                         <span>HP: ${player.health}</span>
+                        <span class="player-weapon">${player.health > 0 ? player.weapon : 'DEAD'}</span>
                     </div>
                     <div class="hp-bar-bg">
                         <div class="hp-bar-fill" style="width: ${hpWidth}%; background-color: ${hpColor};"></div>
@@ -299,7 +334,7 @@ HTML_RADAR_UI = """
                 const data = await response.json();
                 
                 drawRadarGrid();
-                const yawRad = (data.yaw * Math.PI) / 180;
+                const localYawRad = (data.yaw * Math.PI) / 180;
 
                 let myTeamHTML = "";
                 let enemyTeamHTML = "";
@@ -312,17 +347,34 @@ HTML_RADAR_UI = """
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        let rx = p.dx * Math.cos(-yawRad) - p.dy * Math.sin(-yawRad);
-                        let ry = p.dx * Math.sin(-yawRad) + p.dy * Math.cos(-yawRad);
+                        let rx = p.dx * Math.cos(-localYawRad) - p.dy * Math.sin(-localYawRad);
+                        let ry = p.dx * Math.sin(-localYawRad) + p.dy * Math.cos(-localYawRad);
 
                         let screenX = center + (rx * SCALE);
                         let screenY = center - (ry * SCALE);
 
                         let dist = Math.sqrt(Math.pow(screenX - center, 2) + Math.pow(screenY - center, 2));
                         if (dist < center - 10) {
-                            ctx.fillStyle = p.team === data.local_team ? '#00ffcc' : '#ff4444';
-                            ctx.beginPath(); ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI); ctx.fill();
-                            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+                            let relativeYaw = ((p.yaw - data.yaw) * Math.PI) / 180;
+                            let color = p.team === data.local_team ? '#00ffcc' : '#ff4444';
+                            
+                            // 1. Oyuncu Yön Çizgisi
+                            ctx.strokeStyle = color;
+                            ctx.lineWidth = 2.5;
+                            ctx.beginPath();
+                            ctx.moveTo(screenX, screenY);
+                            let lineLength = 15;
+                            ctx.lineTo(screenX + Math.sin(relativeYaw) * lineLength, screenY - Math.cos(relativeYaw) * lineLength);
+                            ctx.stroke();
+
+                            // 2. Oyuncu Noktası
+                            ctx.fillStyle = color;
+                            ctx.beginPath(); 
+                            ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI); 
+                            ctx.fill();
+                            ctx.strokeStyle = '#ffffff'; 
+                            ctx.lineWidth = 1.5; 
+                            ctx.stroke();
                         }
                     }
                 });
@@ -349,7 +401,6 @@ def main():
             sys.stdout.flush()
             time.sleep(1)
 
-    # REZERVASYON DEĞİŞİKLİĞİ: Orijinal kernel32.OpenProcess yerine Indirect NtOpenProcess çağrısı
     handle = indirect_open_process(pid)
     if not handle:
         print("\n[-] Süreç baglantisi (Handle) alinmadi.")
@@ -384,40 +435,4 @@ def main():
                 if listEntry == 0: continue   
                 entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
                 if entity == 0: continue                          
-                entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
-                if entityCPawn == 0: continue   
-                listEntry2  = read_memory(handle, EntityList + 0x8 * ((entityCPawn & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
-                if listEntry2 == 0: continue 
-                entityPawn = read_memory(handle, listEntry2 + 112 * (entityCPawn & 0x1FF), ctypes.c_uint64)
-                if entityPawn == 0: continue 
-
-                player = Entity(handle, entity, entityPawn)
-                player_pos = player.position
-
-                is_local = (entityPawn == localPlayerPawnAddr)
-
-                temp_players.append({
-                    "name": player.name,
-                    "health": player.health,
-                    "money": player.money,
-                    "team": player.team,
-                    "is_local": is_local,
-                    "dx": player_pos["x"] - local_pos["x"],
-                    "dy": player_pos["y"] - local_pos["y"]
-                })
-
-            radar_data = {
-                "yaw": view_angles_y,
-                "local_team": local_team,
-                "players": temp_players
-            }
-            
-            time.sleep(0.02)
-                
-        except Exception:
-            time.sleep(0.1)
-            continue
-
-if __name__ == "__main__":
-    main()
-    
+                entityCPawn = read_memory(handle, 
