@@ -152,8 +152,6 @@ class Offsets:
     m_iszPlayerName = 0x638        
     m_pInGameMoneyServices = 0x6F8 
     m_iAccount = 0x40              
-    
-    # Bomba Ofsetleri
     dwPlantedC4 = 0x19213A0        
     m_bBombPlanted = 0x99D         
     m_flTimerLength = 0xF18        
@@ -187,7 +185,6 @@ class Entity:
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
-# Global Veri Köprüsü
 radar_data = {
     "yaw": 0, 
     "local_team": 0, 
@@ -219,7 +216,6 @@ def run_web_server():
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- Taktiksel HTML5 UI ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -301,20 +297,18 @@ HTML_RADAR_UI = """
             if(player.health < 35) hpColor = '#e74c3c';
             else if(player.health < 70) hpColor = '#f1c40f';
 
-            return `
-                <div class="player-card \${statusClass}">
-                    <div class="player-row">
-                        <span class="player-name">\${player.name}</span>
-                        <span class="player-money">$\${player.money}</span>
-                    </div>
-                    <div class="player-row" style="font-size: 11px; color: #a0aab5;">
-                        <span>HP: \${player.health}</span>
-                    </div>
-                    <div class="hp-bar-bg">
-                        <div class="hp-bar-fill" style="width: \${hpWidth}%; background-color: \${hpColor};"></div>
-                    </div>
-                </div>
-            `;
+            return '<div class="player-card ' + statusClass + '">' +
+                    '<div class="player-row">' +
+                        '<span class="player-name">' + player.name + '</span>' +
+                        '<span class="player-money">$' + player.money + '</span>' +
+                    '</div>' +
+                    '<div class="player-row" style="font-size: 11px; color: #a0aab5;">' +
+                        '<span>HP: ' + player.health + '</span>' +
+                    '</div>' +
+                    '<div class="hp-bar-bg">' +
+                        '<div class="hp-bar-fill" style="width: ' + hpWidth + '%; background-color: ' + hpColor + ';"></div>' +
+                    '</div>' +
+                '</div>';
         }
 
         async function updateDashboard() {
@@ -324,7 +318,7 @@ HTML_RADAR_UI = """
                 
                 const bombEl = document.getElementById('bombStatus');
                 if (data.bomb_planted && data.bomb_time_left > 0) {
-                    bombEl.innerText = `⚠️ BOMBA KURULDU: \${data.bomb_time_left.toFixed(2)}s`;
+                    bombEl.innerText = '⚠️ BOMBA KURULDU: ' + data.bomb_time_left.toFixed(2) + 's';
                     bombEl.className = "bomb-alert active";
                 } else {
                     bombEl.innerText = "C4 DETONATOR: SİNYAL YOK / GÜVENLİ";
@@ -332,7 +326,6 @@ HTML_RADAR_UI = """
                 }
 
                 drawRadarGrid();
-                
                 const viewAngleRad = ((data.yaw - 90) * Math.PI) / 180;
 
                 let myTeamHTML = "";
@@ -422,10 +415,11 @@ def main():
                 if planted_c4:
                     is_planted = read_memory(handle, planted_c4 + Offsets.m_bBombPlanted, ctypes.c_bool)
                     if is_planted:
-                        bomb_planted = True
-                        c4_blow = read_memory(handle, planted_c4 + Offsets.m_flC4Blow, ctypes.c_float)
-                        time_remaining = c4_blow - current_time
-                        bomb_time_left = max(0.0, time_remaining)
+                        blow_time = read_memory(handle, planted_c4 + Offsets.m_flC4Blow, ctypes.c_float)
+                        calc_time = blow_time - current_time
+                        if calc_time > 0:
+                            bomb_planted = True
+                            bomb_time_left = calc_time
 
             temp_players = []
 
@@ -435,4 +429,5 @@ def main():
                 entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
                 if entity == 0: continue                          
                 entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
-                if entityCPawn == 0: continue
+                if entityCPawn == 0: continue   
+               
