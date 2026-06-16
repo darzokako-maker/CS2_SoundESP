@@ -63,7 +63,6 @@ def _get_ntdll_syscall_address():
 
 _LEGAL_SYSCALL_ADDR = _get_ntdll_syscall_address()
 
-# Shellcode Yapılandırmaları
 _op_shellcode = b"\x4C\x8B\xD1\xB8\x26\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 _rvm_shellcode = b"\x4C\x8B\xD1\xB8\x3F\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 
@@ -74,7 +73,7 @@ _IndirectNtOpenProcess = ctypes.WINFUNCTYPE(wintypes.DWORD, ctypes.POINTER(winty
 buf_rvm = kernel32.VirtualAlloc(None, len(_rvm_shellcode), 0x1000 | 0x2000, 0x40)
 ctypes.memmove(buf_rvm, _rvm_shellcode, len(_rvm_shellcode))
 
-# DÜZELTME: Çökmeyi önlemek için restype DWORD (NTSTATUS) olarak ayarlandı
+# DÜZELTME: Fonksiyonun geri dönüş tipi açıkça DWORD yapılarak 64-bit sistemlerdeki çökme engellendi.
 _IndirectNtReadVirtualMemory = ctypes.WINFUNCTYPE(wintypes.DWORD, wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t))(buf_rvm)
 
 def indirect_open_process(pid):
@@ -174,6 +173,7 @@ class Entity:
     @property
     def name(self):
         if not self.controller: return "Player"
+        # DÜZELTME: m_iszPlayerName bir pointer'dır. Önce adresteki işaretçi okunur.
         name_ptr = read_memory(self.handle, self.controller + Offsets.m_iszPlayerName, ctypes.c_uint64)
         if name_ptr:
             return read_string(self.handle, name_ptr, 32)
@@ -182,6 +182,7 @@ class Entity:
     @property
     def money(self):
         if not self.controller: return 0
+        # DÜZELTME: m_pInGameMoneyServices yapısı Pawn üzerinde değil, Controller üzerindedir.
         money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
@@ -213,7 +214,7 @@ def run_web_server():
             print(f"[+] Web Arayüzü Başlatıldı: http://localhost:{PORT}")
             httpd.serve_forever()
     except Exception as e:
-        print(f"[-] Sunucu başlatma hatası (Port dolu olabilir): {e}")
+        print(f"[-] Sunucu başlatma hatası (Port kullanımda olabilir): {e}")
 
 # --- HTML ARAYÜZÜ ---
 HTML_RADAR_UI = """
@@ -436,6 +437,5 @@ if __name__ == "__main__":
     except Exception as e:
         print("\n[CRITICAL ERROR] Program beklenmedik bir hata nedeniyle çöktü:")
         traceback.print_exc()
-        print("\nKapanmayı engellemek ve hatayı okuyabilmeniz için bekleniyor. Enter'a basın...")
+        print("\nKapanmayı engellemek için bekleniyor. Enter'a basın...")
         input()
-        
