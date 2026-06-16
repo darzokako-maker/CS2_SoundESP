@@ -23,7 +23,7 @@ kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 
-# Global C-Struct Tanımlamaları
+# Global C-Struct Tanımlamaları (Hizalama ve Çökmeleri Önlemek İçin Globalde)
 class CLIENT_ID(ctypes.Structure):
     _fields_ = [("UniqueProcess", wintypes.HANDLE), ("UniqueThread", wintypes.HANDLE)]
 
@@ -62,6 +62,7 @@ def _get_ntdll_syscall_address():
 
 _LEGAL_SYSCALL_ADDR = _get_ntdll_syscall_address()
 
+# NtOpenProcess (Syscall ID: 0x0026) & NtReadVirtualMemory (Syscall ID: 0x003F)
 _op_shellcode = b"\x4C\x8B\xD1\xB8\x26\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 _rvm_shellcode = b"\x4C\x8B\xD1\xB8\x3F\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 
@@ -81,6 +82,7 @@ def indirect_open_process(pid):
         return handle.value
     return None
 
+# --- Orijinal Fonksiyon Yapılarının Indirect Sürümleri ---
 def get_process_id(process_name):
     TH32CS_SNAPPROCESS = 0x00000002
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -114,6 +116,7 @@ def get_module_base(pid, module_name):
     kernel32.CloseHandle(snapshot)
     return None
 
+# API yerine Indirect Çağrı kullanan hafıza okuma fonksiyonları
 def read_memory(handle, address, c_type):
     buffer = c_type()
     bytes_read = ctypes.c_size_t()
@@ -126,10 +129,10 @@ def read_string(handle, address, max_len=32):
     bytes_read = ctypes.c_size_t()
     if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), max_len, ctypes.byref(bytes_read)) == 0:
         try:
-            return buffer.value.decode('utf-8', errors='ignore').split('\x00')[0]
+            return buffer.value.decode('utf-8', errors='ignore')
         except:
-            return "Player"
-    return "Player"
+            return "Unknown"
+    return "Unknown"
 
 def read_vec3(handle, address):
     class Vec3(ctypes.Structure):
@@ -140,13 +143,11 @@ def read_vec3(handle, address):
         return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
     return {"x": 0, "y": 0, "z": 0}
 
-# --- Ofset Yapılandırması ---
+# --- 2026 Ofsetleri ---
 class Offsets: 
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
     dwCSGOInput = 0x2356240        
-    dwPlantedC4 = 0x24E07B0        # Bomba durumu ve konumu için gerekli ana pointer
-    dwGlobalVars = 0x175CBA0       # Oyun içi mutlak zamanı (PlantedC4 zaman hesaplaması için) okumak adına
     m_iTeamNum = 0x3EB             
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
@@ -173,20 +174,13 @@ class Entity:
         return read_string(self.handle, self.controller + Offsets.m_iszPlayerName, 32)
     @property
     def money(self):
-        if not self.controller: return 0
-        money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
+        if not self.pawn: return 0
+        money_services = read_memory(self.handle, self.pawn + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
-# Global Veri Köprüsü (Bomba Bilgileri Dahil)
-radar_data = {
-    "yaw": 0, 
-    "local_team": 0, 
-    "players": [],
-    "bomb_planted": False,
-    "bomb_time_left": 40.0,
-    "bomb_pos": {"x": 0, "y": 0, "z": 0}
-}
+# Global Veri Köprüsü
+radar_data = {"yaw": 0, "local_team": 0, "players": []}
 
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args): return
@@ -211,7 +205,7 @@ def run_web_server():
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- GELİŞTİRİLMİŞ 3 BÖLMELİ HTML5 & CSS3 ARAYÜZÜ ---
+# --- 3 BÖLMELİ HTML5 & CSS3 ARAYÜZÜ (MATEMATİKSEL YÖN ONARIMLI) ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -232,16 +226,9 @@ HTML_RADAR_UI = """
         .player-money { color: #2ecc71; font-weight: bold; font-family: monospace; }
         .hp-bar-bg { width: 100%; background: #222; height: 6px; border-radius: 3px; overflow: hidden; }
         .hp-bar-fill { height: 100%; background: #2ecc71; transition: width 0.1s; }
-        
-        .center-panel { width: 44%; display: flex; flex-direction: column; justify-content: center; align-items: center; position: relative; background: #0d1017; }
+        .center-panel { width: 44%; display: flex; justify-content: center; align-items: center; position: relative; background: #0d1017; }
         canvas { background: #12161f; border-radius: 50%; border: 4px solid #242b35; box-shadow: 0 0 30px rgba(0,0,0,0.7); }
-        .info-label { margin-bottom: 15px; font-size: 14px; font-weight: bold; color: #526273; letter-spacing: 1px; }
-        
-        /* Bomba Gösterge Paneli */
-        .bomb-alert { width: 80%; background: rgba(231, 76, 60, 0.1); border: 2px solid #e74c3c; border-radius: 6px; padding: 10px; text-align: center; margin-top: 15px; display: none; }
-        .bomb-alert.active { display: block; animation: pulse 1s infinite alternate; }
-        .bomb-timer { font-size: 24px; font-weight: bold; color: #e74c3c; font-family: monospace; }
-        @keyframes pulse { from { box-shadow: 0 0 5px #e74c3c; } to { box-shadow: 0 0 20px #e74c3c; } }
+        .info-label { position: absolute; top: 20px; font-size: 14px; font-weight: bold; color: #526273; letter-spacing: 1px; }
     </style>
 </head>
 <body>
@@ -252,10 +239,6 @@ HTML_RADAR_UI = """
     <div class="panel center-panel">
         <div class="info-label">TACTICAL REALTIME RADAR</div>
         <canvas id="radar" width="520" height="520"></canvas>
-        <div id="bombPanel" class="bomb-alert">
-            <div style="font-size: 12px; color: #e74c3c; font-weight: bold;">BOMBA KURULDU! (PLANTED)</div>
-            <div id="bombCountdown" class="bomb-timer">40.0s</div>
-        </div>
     </div>
     <div class="panel team-panel" style="border-right: none;">
         <div class="team-title team-enemy">RAKİPLER (ENEMIES)</div>
@@ -267,15 +250,8 @@ HTML_RADAR_UI = """
         const center = canvas.width / 2;
         const SCALE = 0.16;
 
-        function drawRadarGrid(yaw) {
+        function drawRadarGrid() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
-            // Radarı oyuncunun bakış açısına göre döndürüyoruz (Kafanı nereye çevirirsen orası Yukon/Yukarı olur)
-            ctx.save();
-            ctx.translate(center, center);
-            ctx.rotate((-yaw * Math.PI) / 180 - Math.PI/2);
-            ctx.translate(-center, -center);
-
             ctx.strokeStyle = '#1f2533';
             ctx.lineWidth = 1;
             for(let r = 80; r <= center; r += 80) {
@@ -285,16 +261,14 @@ HTML_RADAR_UI = """
             ctx.moveTo(center, 0); ctx.lineTo(center, canvas.height);
             ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
             ctx.stroke();
-            ctx.restore();
 
-            // Lokal oyuncu (Sen) her zaman merkezde sabit yukarı bakar
+            // SAKİN DURUŞ: Local Player (Sen) her zaman tam ileriye bakar (Açısı yukarı kilitli)
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
             ctx.moveTo(center, center - 12);
             ctx.lineTo(center - 8, center + 8);
             ctx.lineTo(center + 8, center + 8);
             ctx.closePath(); ctx.fill();
-            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
         }
 
         function createPlayerCard(player) {
@@ -307,7 +281,7 @@ HTML_RADAR_UI = """
             return `
                 <div class="player-card ${statusClass}">
                     <div class="player-row">
-                        <span class="player-name">${player.name || "Player"}</span>
+                        <span class="player-name">${player.name}</span>
                         <span class="player-money">$${player.money}</span>
                     </div>
                     <div class="player-row" style="font-size: 11px; color: #a0aab5;">
@@ -325,21 +299,13 @@ HTML_RADAR_UI = """
                 const response = await fetch('/data');
                 const data = await response.json();
                 
-                // Radarı kendi açımıza göre çizdirme mekanizması
-                drawRadarGrid(data.yaw);
-                const yawRad = (data.yaw * Math.PI) / 180;
+                drawRadarGrid();
+                
+                // Yaw açısı radyana çevrilerek 2D düzlem rotasyonu doğru yöne eşitlendi
+                let yawRad = (data.yaw * Math.PI) / 180.0;
 
                 let myTeamHTML = "";
                 let enemyTeamHTML = "";
-
-                // Bomba Sayacı Yönetimi
-                const bombPanel = document.getElementById('bombPanel');
-                if (data.bomb_planted && data.bomb_time_left > 0) {
-                    bombPanel.classList.add('active');
-                    document.getElementById('bombCountdown').innerText = data.bomb_time_left.toFixed(1) + "s";
-                } else {
-                    bombPanel.classList.remove('active');
-                }
 
                 data.players.forEach(p => {
                     if (p.team === data.local_team) {
@@ -349,13 +315,13 @@ HTML_RADAR_UI = """
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        // Dünya koordinat farklarını senin anlık bakış açına (Yaw) göre döndürme matrisi
-                        let rx = p.dx * Math.cos(-yawRad) - p.dy * Math.sin(-yawRad);
-                        let ry = p.dx * Math.sin(-yawRad) + p.dy * Math.cos(-yawRad);
+                        // Dönüş matrisi onarıldı: Karakterin baktığı yöne göre düşman konumlandırması
+                        let rx = p.dx * Math.cos(yawRad) + p.dy * Math.sin(yawRad);
+                        let ry = p.dx * Math.sin(yawRad) - p.dy * Math.cos(yawRad);
 
-                        // Ekran düzlemine projeksiyon (Y ekseni 2D düzlemde aşağı doğru büyüdüğü için çıkartılır)
+                        // Eksen doğrultuları pencerelere göre kalibre edildi
                         let screenX = center + (rx * SCALE);
-                        let screenY = center - (ry * SCALE);
+                        let screenY = center + (ry * SCALE);
 
                         let dist = Math.sqrt(Math.pow(screenX - center, 2) + Math.pow(screenY - center, 2));
                         if (dist < center - 10) {
@@ -365,21 +331,6 @@ HTML_RADAR_UI = """
                         }
                     }
                 });
-
-                // Bomba kuruluysa radar üzerinde ikonunu göster
-                if (data.bomb_planted) {
-                    let bx = data.bomb_pos.dx * Math.cos(-yawRad) - data.bomb_pos.dy * Math.sin(-yawRad);
-                    let by = data.bomb_pos.dx * Math.sin(-yawRad) + data.bomb_pos.dy * Math.cos(-yawRad);
-                    let bScreenX = center + (bx * SCALE);
-                    let bScreenY = center - (by * SCALE);
-                    
-                    let bDist = Math.sqrt(Math.pow(bScreenX - center, 2) + Math.pow(bScreenY - center, 2));
-                    if (bDist < center - 10) {
-                        ctx.fillStyle = '#e74c3c';
-                        ctx.fillRect(bScreenX - 5, bScreenY - 5, 10, 10); // Kırmızı kare bomba simgesi
-                        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
-                    }
-                }
 
                 document.getElementById('myTeamList').innerHTML = myTeamHTML;
                 document.getElementById('enemyTeamList').innerHTML = enemyTeamHTML;
@@ -428,4 +379,49 @@ def main():
             localPlayer = Entity(handle, 0, localPlayerPawnAddr)
             local_pos = localPlayer.position
             local_team = localPlayer.team
-            view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_uint64)
+            view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
+
+            temp_players = []
+
+            for i in range(1, 64):
+                listEntry = read_memory(handle, EntityList + (8 * (i & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
+                if listEntry == 0: continue   
+                entity = read_memory(handle, listEntry + 112 * (i & 0x1FF), ctypes.c_uint64)
+                if entity == 0: continue                          
+                entityCPawn = read_memory(handle, entity + Offsets.m_hPlayerPawn, ctypes.c_uint)
+                if entityCPawn == 0: continue   
+                listEntry2  = read_memory(handle, EntityList + 0x8 * ((entityCPawn & 0x7FFF) >> 9) + 16, ctypes.c_uint64)
+                if listEntry2 == 0: continue 
+                entityPawn = read_memory(handle, listEntry2 + 112 * (entityCPawn & 0x1FF), ctypes.c_uint64)
+                if entityPawn == 0: continue 
+
+                player = Entity(handle, entity, entityPawn)
+                player_pos = player.position
+
+                is_local = (entityPawn == localPlayerPawnAddr)
+
+                temp_players.append({
+                    "name": player.name,
+                    "health": player.health,
+                    "money": player.money,
+                    "team": player.team,
+                    "is_local": is_local,
+                    "dx": player_pos["x"] - local_pos["x"],
+                    "dy": player_pos["y"] - local_pos["y"]
+                })
+
+            radar_data = {
+                "yaw": view_angles_y,
+                "local_team": local_team,
+                "players": temp_players
+            }
+            
+            time.sleep(0.02)
+                
+        except Exception:
+            time.sleep(0.1)
+            continue
+
+if __name__ == "__main__":
+    main()
+        
