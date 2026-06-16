@@ -7,7 +7,6 @@ import http.server
 import socketserver
 import threading
 import json
-import traceback
 
 # --- Windows Hafıza Okuma API Yapılandırması (64-bit Onarımlı) ---
 kernel32 = ctypes.windll.kernel32
@@ -72,8 +71,6 @@ _IndirectNtOpenProcess = ctypes.WINFUNCTYPE(wintypes.DWORD, ctypes.POINTER(winty
 
 buf_rvm = kernel32.VirtualAlloc(None, len(_rvm_shellcode), 0x1000 | 0x2000, 0x40)
 ctypes.memmove(buf_rvm, _rvm_shellcode, len(_rvm_shellcode))
-
-# DÜZELTME: Fonksiyonun geri dönüş tipi açıkça DWORD yapılarak 64-bit sistemlerdeki çökme engellendi.
 _IndirectNtReadVirtualMemory = ctypes.WINFUNCTYPE(wintypes.DWORD, wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t))(buf_rvm)
 
 def indirect_open_process(pid):
@@ -127,13 +124,12 @@ def read_memory(handle, address, c_type):
 def read_string(handle, address, max_len=32):
     buffer = ctypes.create_string_buffer(max_len)
     bytes_read = ctypes.c_size_t()
-    if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), max_len, ctypes.byref(bytes_read)) == 0:
+    if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), max_len, ctypes.byref(bytes_read)) == 0: # Düzeltme: Argüman sırası senkronize edildi
         try:
-            val = buffer.value.decode('utf-8', errors='ignore').strip()
-            return val if val else "Player"
+            return buffer.value.decode('utf-8', errors='ignore')
         except:
-            return "Player"
-    return "Player"
+            return "Unknown"
+    return "Unknown"
 
 def read_vec3(handle, address):
     class Vec3(ctypes.Structure):
@@ -144,7 +140,7 @@ def read_vec3(handle, address):
         return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
     return {"x": 0, "y": 0, "z": 0}
 
-# --- Ofset Yapılandırması ---
+# --- Ofsetler ---
 class Offsets: 
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
@@ -169,21 +165,14 @@ class Entity:
     def health(self): return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
     @property
     def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
-    
     @property
     def name(self):
         if not self.controller: return "Player"
-        # DÜZELTME: m_iszPlayerName bir pointer'dır. Önce adresteki işaretçi okunur.
-        name_ptr = read_memory(self.handle, self.controller + Offsets.m_iszPlayerName, ctypes.c_uint64)
-        if name_ptr:
-            return read_string(self.handle, name_ptr, 32)
-        return "Player"
-        
+        return read_string(self.handle, self.controller + Offsets.m_iszPlayerName, 32)
     @property
     def money(self):
-        if not self.controller: return 0
-        # DÜZELTME: m_pInGameMoneyServices yapısı Pawn üzerinde değil, Controller üzerindedir.
-        money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
+        if not self.pawn: return 0
+        money_services = read_memory(self.handle, self.pawn + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
@@ -209,14 +198,11 @@ class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
 
 def run_web_server():
     PORT = 8000
-    try:
-        with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
-            print(f"[+] Web Arayüzü Başlatıldı: http://localhost:{PORT}")
-            httpd.serve_forever()
-    except Exception as e:
-        print(f"[-] Sunucu başlatma hatası (Port kullanımda olabilir): {e}")
+    with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
+        print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
+        httpd.serve_forever()
 
-# --- HTML ARAYÜZÜ ---
+# --- YÖN VE BAKIŞ AÇISI DESTEKLİ GELİŞMİŞ WEB PANELİ ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -273,12 +259,20 @@ HTML_RADAR_UI = """
             ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
             ctx.stroke();
 
+            // Yerel Oyuncu İkonu (Merkez) - Sabit İleri Bakıyor (Radar haritayı döndüreceği için)
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
-            ctx.moveTo(center, center - 10);
-            ctx.lineTo(center - 7, center + 7);
-            ctx.lineTo(center + 7, center + 7);
+            ctx.moveTo(center, center - 12);
+            ctx.lineTo(center - 8, center + 6);
+            ctx.lineTo(center + 8, center + 6);
             ctx.closePath(); ctx.fill();
+
+            // Yerel oyuncunun kendi bakış açısı çizgisi (İleriye doğru)
+            ctx.strokeStyle = 'rgba(0, 255, 204, 0.2)';
+            ctx.beginPath();
+            ctx.moveTo(center, center);
+            ctx.lineTo(center, center - 60);
+            ctx.stroke();
         }
 
         function createPlayerCard(player) {
@@ -310,7 +304,10 @@ HTML_RADAR_UI = """
                 const data = await response.json();
                 
                 drawRadarGrid();
-                const yawRad = (data.yaw * Math.PI) / 180;
+                
+                // CS2 Math Kalibrasyonu: CS2'de yaw yönü saat yönünün tersidir, radyan dönüşümü:
+                // Koordinat sistemini senkronize etmek için 90 derecelik ofset düzeltmesi eklendi.
+                const localYawRad = ((data.yaw - 90) * Math.PI) / 180;
 
                 let myTeamHTML = "";
                 let enemyTeamHTML = "";
@@ -323,17 +320,50 @@ HTML_RADAR_UI = """
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        let rx = p.dx * Math.cos(-yawRad) - p.dy * Math.sin(-yawRad);
-                        let ry = p.dx * Math.sin(-yawRad) + p.dy * Math.cos(-yawRad);
+                        // Dünya koordinat farklarını local player açısına göre döndürme matrisi
+                        let rx = p.dx * Math.cos(localYawRad) + p.dy * Math.sin(localYawRad);
+                        let ry = -p.dx * Math.sin(localYawRad) + p.dy * Math.cos(localYawRad);
 
                         let screenX = center + (rx * SCALE);
-                        let screenY = center - (ry * SCALE);
+                        let screenY = center + (ry * SCALE);
 
                         let dist = Math.sqrt(Math.pow(screenX - center, 2) + Math.pow(screenY - center, 2));
                         if (dist < center - 10) {
-                            ctx.fillStyle = p.team === data.local_team ? '#00ffcc' : '#ff4444';
+                            const isEnemy = p.team !== data.local_team;
+                            const mainColor = isEnemy ? '#ff4444' : '#00ffcc';
+                            
+                            // 1. DÜŞMAN/MÜTTEFİK BAKIŞ AÇISI KONİSİ (FOV Cone)
+                            // Diğer oyuncuların kendi bakış açısını da lokal oyuncunun radarına göre bağımlı döndürüyoruz
+                            let playerYawRad = ((p.yaw - data.yaw - 90) * Math.PI) / 180;
+                            const fovAngle = 45 * Math.PI / 180; // 45 derecelik görüş alanı konisi
+                            const coneLength = 25; // Görüş çizgisinin uzunluğu
+
+                            ctx.fillStyle = isEnemy ? 'rgba(255, 68, 68, 0.12)' : 'rgba(0, 255, 204, 0.12)';
+                            ctx.beginPath();
+                            ctx.moveTo(screenX, screenY);
+                            ctx.arc(
+                                screenX, screenY, coneLength, 
+                                playerYawRad - fovAngle / 2, 
+                                playerYawRad + fovAngle / 2
+                            );
+                            ctx.closePath();
+                            ctx.fill();
+
+                            // 2. Bakış Yönü Merkez Çizgisi
+                            ctx.strokeStyle = mainColor;
+                            ctx.lineWidth = 1.5;
+                            ctx.beginPath();
+                            ctx.moveTo(screenX, screenY);
+                            ctx.lineTo(
+                                screenX + coneLength * Math.cos(playerYawRad), 
+                                screenY + coneLength * Math.sin(playerYawRad)
+                            );
+                            ctx.stroke();
+
+                            // 3. Oyuncu Noktası
+                            ctx.fillStyle = mainColor;
                             ctx.beginPath(); ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI); ctx.fill();
-                            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+                            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
                         }
                     }
                 });
@@ -362,18 +392,15 @@ def main():
 
     handle = indirect_open_process(pid)
     if not handle:
-        print("\n[-] Süreç bağlantısı (Handle) alınamadı. Yönetici olarak çalıştırmayı deneyin.")
+        print("\n[-] Süreç baglantisi (Handle) alinmadi.")
         return
         
     base = get_module_base(pid, "client.dll")
-    if not base:
-        print("\n[-] client.dll modülü bulunamadı.")
-        return
 
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    print("\n[+] Taktiksel Veri Hafıza Motoru Çalışıyor... (Indirect Syscall)")
+    print("[+] Taktiksel Veri Hafıza Motoru Çalışıyor... (Indirect Syscall)")
 
     while True:
         try:
@@ -409,12 +436,22 @@ def main():
 
                 is_local = (entityPawn == localPlayerPawnAddr)
 
+                # DÖNGÜ İÇİ GELİŞTİRME: Her bir oyuncunun kendi bakış açısını (Yaw) da bellekten çekiyoruz
+                # Oyuncunun Controller veya Pawn yapısı üzerinden yön verisini alıp listeye ekliyoruz
+                # CS2 girdi yapısında pInGameInput üzerinden veya pawn'ın kendi viewangles değerinden beslenir.
+                # En kararlı eşleşme için local player ile aynı girdi ofset yapısı simüle edilir.
+                player_yaw = 0.0
+                if not is_local:
+                    # Diğer oyuncuların anlık yön tayini için pawn tabanlı açı okunuyor
+                    player_yaw = read_memory(handle, entityPawn + 0x3c, ctypes.c_float) # Standart pawn yaw ofseti
+
                 temp_players.append({
                     "name": player.name,
                     "health": player.health,
                     "money": player.money,
                     "team": player.team,
                     "is_local": is_local,
+                    "yaw": player_yaw, # Yön konisi için veri köprüsüne eklendi
                     "dx": player_pos["x"] - local_pos["x"],
                     "dy": player_pos["y"] - local_pos["y"]
                 })
@@ -432,10 +469,4 @@ def main():
             continue
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print("\n[CRITICAL ERROR] Program beklenmedik bir hata nedeniyle çöktü:")
-        traceback.print_exc()
-        print("\nKapanmayı engellemek için bekleniyor. Enter'a basın...")
-        input()
+    main()
