@@ -8,7 +8,7 @@ import socketserver
 import threading
 import json
 
-# --- Windows Hafıza Okuma API Yapılandırması (64-bit Onarımlı) ---
+# --- Windows Hafıza Okuma API Yapılandırması (64-bit Onarımlı ve Stabilize Edilmiş) ---
 kernel32 = ctypes.windll.kernel32
 
 kernel32.VirtualAlloc.restype = ctypes.c_void_p
@@ -20,6 +20,7 @@ kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 kernel32.GetProcAddress.restype = ctypes.c_void_p
 kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
 
+# 64-bit Taşıma Hatasını Önlemek İçin Tipler Doğru Genişliğe Çekildi
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 
@@ -47,6 +48,12 @@ class MODULEENTRY32(ctypes.Structure):
         ("GlblcntUsage", wintypes.DWORD), ("ProccntUsage", wintypes.DWORD), ("modBaseAddr", ctypes.POINTER(ctypes.c_byte)),
         ("modBaseSize", wintypes.DWORD), ("hModule", wintypes.HANDLE), ("szModule", ctypes.c_char * 256), ("szExePath", ctypes.c_char * 260)
     ]
+
+# Toolhelp fonksiyonlarının tiplerini globalde bir kez tanımlıyoruz (Çökmeyi önleyen kritik kısım)
+kernel32.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
+kernel32.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
+kernel32.Module32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
+kernel32.Module32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
 
 # --- MEŞRU SYSCALL BULUCU VE ASSEMBLY KÖPRÜLERİ ---
 def _get_ntdll_syscall_address():
@@ -86,8 +93,6 @@ def get_process_id(process_name):
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     pe = PROCESSENTRY32()
     pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
-    kernel32.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
-    kernel32.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
     
     if kernel32.Process32First(snapshot, ctypes.byref(pe)):
         while kernel32.Process32Next(snapshot, ctypes.byref(pe)):
@@ -99,11 +104,12 @@ def get_process_id(process_name):
 
 def get_module_base(pid, module_name):
     TH32CS_SNAPMODULE = 0x00000008
-    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid)
+    # Overflow hatasını önlemek için pid değerini kesin olarak 32-bit tamsayıya maskeliyoruz
+    safe_pid = int(pid) & 0xFFFFFFFF
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, safe_pid)
+    
     me = MODULEENTRY32()
     me.dwSize = ctypes.sizeof(MODULEENTRY32)
-    kernel32.Module32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
-    kernel32.Module32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
     
     if kernel32.Module32First(snapshot, ctypes.byref(me)):
         while kernel32.Module32Next(snapshot, ctypes.byref(me)):
@@ -124,7 +130,7 @@ def read_memory(handle, address, c_type):
 def read_string(handle, address, max_len=32):
     buffer = ctypes.create_string_buffer(max_len)
     bytes_read = ctypes.c_size_t()
-    if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), max_len, ctypes.byref(bytes_read)) == 0: # Düzeltme: Argüman sırası senkronize edildi
+    if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), max_len, ctypes.byref(bytes_read)) == 0:
         try:
             return buffer.value.decode('utf-8', errors='ignore')
         except:
@@ -259,7 +265,6 @@ HTML_RADAR_UI = """
             ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
             ctx.stroke();
 
-            // Yerel Oyuncu İkonu (Merkez) - Sabit İleri Bakıyor (Radar haritayı döndüreceği için)
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
             ctx.moveTo(center, center - 12);
@@ -267,7 +272,6 @@ HTML_RADAR_UI = """
             ctx.lineTo(center + 8, center + 6);
             ctx.closePath(); ctx.fill();
 
-            // Yerel oyuncunun kendi bakış açısı çizgisi (İleriye doğru)
             ctx.strokeStyle = 'rgba(0, 255, 204, 0.2)';
             ctx.beginPath();
             ctx.moveTo(center, center);
@@ -305,8 +309,6 @@ HTML_RADAR_UI = """
                 
                 drawRadarGrid();
                 
-                // CS2 Math Kalibrasyonu: CS2'de yaw yönü saat yönünün tersidir, radyan dönüşümü:
-                // Koordinat sistemini senkronize etmek için 90 derecelik ofset düzeltmesi eklendi.
                 const localYawRad = ((data.yaw - 90) * Math.PI) / 180;
 
                 let myTeamHTML = "";
@@ -320,7 +322,6 @@ HTML_RADAR_UI = """
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        // Dünya koordinat farklarını local player açısına göre döndürme matrisi
                         let rx = p.dx * Math.cos(localYawRad) + p.dy * Math.sin(localYawRad);
                         let ry = -p.dx * Math.sin(localYawRad) + p.dy * Math.cos(localYawRad);
 
@@ -332,35 +333,24 @@ HTML_RADAR_UI = """
                             const isEnemy = p.team !== data.local_team;
                             const mainColor = isEnemy ? '#ff4444' : '#00ffcc';
                             
-                            // 1. DÜŞMAN/MÜTTEFİK BAKIŞ AÇISI KONİSİ (FOV Cone)
-                            // Diğer oyuncuların kendi bakış açısını da lokal oyuncunun radarına göre bağımlı döndürüyoruz
                             let playerYawRad = ((p.yaw - data.yaw - 90) * Math.PI) / 180;
-                            const fovAngle = 45 * Math.PI / 180; // 45 derecelik görüş alanı konisi
-                            const coneLength = 25; // Görüş çizgisinin uzunluğu
+                            const fovAngle = 45 * Math.PI / 180;
+                            const coneLength = 25;
 
                             ctx.fillStyle = isEnemy ? 'rgba(255, 68, 68, 0.12)' : 'rgba(0, 255, 204, 0.12)';
                             ctx.beginPath();
                             ctx.moveTo(screenX, screenY);
-                            ctx.arc(
-                                screenX, screenY, coneLength, 
-                                playerYawRad - fovAngle / 2, 
-                                playerYawRad + fovAngle / 2
-                            );
+                            ctx.arc(screenX, screenY, coneLength, playerYawRad - fovAngle / 2, playerYawRad + fovAngle / 2);
                             ctx.closePath();
                             ctx.fill();
 
-                            // 2. Bakış Yönü Merkez Çizgisi
                             ctx.strokeStyle = mainColor;
                             ctx.lineWidth = 1.5;
                             ctx.beginPath();
                             ctx.moveTo(screenX, screenY);
-                            ctx.lineTo(
-                                screenX + coneLength * Math.cos(playerYawRad), 
-                                screenY + coneLength * Math.sin(playerYawRad)
-                            );
+                            ctx.lineTo(screenX + coneLength * Math.cos(playerYawRad), screenY + coneLength * Math.sin(playerYawRad));
                             ctx.stroke();
 
-                            // 3. Oyuncu Noktası
                             ctx.fillStyle = mainColor;
                             ctx.beginPath(); ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI); ctx.fill();
                             ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
@@ -436,14 +426,9 @@ def main():
 
                 is_local = (entityPawn == localPlayerPawnAddr)
 
-                # DÖNGÜ İÇİ GELİŞTİRME: Her bir oyuncunun kendi bakış açısını (Yaw) da bellekten çekiyoruz
-                # Oyuncunun Controller veya Pawn yapısı üzerinden yön verisini alıp listeye ekliyoruz
-                # CS2 girdi yapısında pInGameInput üzerinden veya pawn'ın kendi viewangles değerinden beslenir.
-                # En kararlı eşleşme için local player ile aynı girdi ofset yapısı simüle edilir.
                 player_yaw = 0.0
                 if not is_local:
-                    # Diğer oyuncuların anlık yön tayini için pawn tabanlı açı okunuyor
-                    player_yaw = read_memory(handle, entityPawn + 0x3c, ctypes.c_float) # Standart pawn yaw ofseti
+                    player_yaw = read_memory(handle, entityPawn + 0x3c, ctypes.c_float)
 
                 temp_players.append({
                     "name": player.name,
@@ -451,7 +436,7 @@ def main():
                     "money": player.money,
                     "team": player.team,
                     "is_local": is_local,
-                    "yaw": player_yaw, # Yön konisi için veri köprüsüne eklendi
+                    "yaw": player_yaw,
                     "dx": player_pos["x"] - local_pos["x"],
                     "dy": player_pos["y"] - local_pos["y"]
                 })
@@ -469,4 +454,3 @@ def main():
             continue
 
 if __name__ == "__main__":
-    main()
