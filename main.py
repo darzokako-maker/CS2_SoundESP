@@ -82,7 +82,6 @@ def indirect_open_process(pid):
         return handle.value
     return None
 
-# --- Orijinal Fonksiyon Yapılarının Indirect Sürümleri ---
 def get_process_id(process_name):
     TH32CS_SNAPPROCESS = 0x00000002
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -116,7 +115,6 @@ def get_module_base(pid, module_name):
     kernel32.CloseHandle(snapshot)
     return None
 
-# API yerine Indirect Çağrı kullanan hafıza okuma fonksiyonları
 def read_memory(handle, address, c_type):
     buffer = c_type()
     bytes_read = ctypes.c_size_t()
@@ -143,7 +141,7 @@ def read_vec3(handle, address):
         return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
     return {"x": 0, "y": 0, "z": 0}
 
-# --- 2026 Ofsetleri ---
+# --- GÜNCEL CS2 OFSETLERİ VE ŞEMALARI ---
 class Offsets: 
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
@@ -153,14 +151,17 @@ class Offsets:
     m_vOldOrigin = 0x1390          
     m_hPlayerPawn = 0x90C          
     m_iszPlayerName = 0x638        
-    m_pInGameMoneyServices = 0x6F8 
+    m_pInGameMoneyServices = 0x6F8 # Controller bazlı yeni offset
     m_iAccount = 0x40              
+    m_pWeaponServices = 0x11A0     # Pawn içindeki silah servisleri
+    m_hActiveWeapon = 0x58         # Aktif silahın handle değeri
 
 class Entity:
-    def __init__(self, handle, controller, pawn):
+    def __init__(self, handle, controller, pawn, entity_list_base=0):
         self.handle = handle
         self.controller = controller
         self.pawn = pawn
+        self.entity_list_base = entity_list_base
     
     @property
     def team(self): return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
@@ -168,16 +169,55 @@ class Entity:
     def health(self): return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
     @property
     def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
+    
     @property
     def name(self):
         if not self.controller: return "Player"
         return read_string(self.handle, self.controller + Offsets.m_iszPlayerName, 32)
+    
     @property
     def money(self):
-        if not self.pawn: return 0
-        money_services = read_memory(self.handle, self.pawn + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
+        if not self.controller: return 0
+        # Düzeltme: Para sistemi Pawn değil, tamamen Controller üzerinden okunur.
+        money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
+
+    @property
+    def weapon_name(self):
+        if not self.pawn or not self.entity_list_base: return "None"
+        
+        # 1. Aşama: Weapon Services katmanına ulaş
+        weapon_services = read_memory(self.handle, self.pawn + Offsets.m_pWeaponServices, ctypes.c_uint64)
+        if not weapon_services: return "None"
+        
+        # 2. Aşama: Aktif silahın handle ID'sini çek
+        active_weapon_handle = read_memory(self.handle, weapon_services + Offsets.m_hActiveWeapon, ctypes.c_uint32)
+        weapon_index = active_weapon_handle & 0x7FFF
+        if not weapon_index: return "None"
+        
+        # 3. Aşama: Entity List döngüsü mantığıyla silahın base verisine dallan
+        list_entry = read_memory(self.handle, self.entity_list_base + (8 * (weapon_index >> 9)) + 16, ctypes.c_uint64)
+        if not list_entry: return "None"
+        
+        weapon_entity = read_memory(self.handle, list_entry + 120 * (weapon_index & 0x1FF), ctypes.c_uint64)
+        if not weapon_entity: return "None"
+        
+        # 4. Aşama: Silahın şema isminin adresini çöz (Veri yapılarındaki sabit kimliği)
+        v_table = read_memory(self.handle, weapon_entity, ctypes.c_uint64)
+        if not v_table: return "None"
+        
+        type_name_ptr = read_memory(self.handle, v_table + 0x38, ctypes.c_uint64)
+        if not type_name_ptr: return "None"
+        
+        raw_name = read_string(self.handle, type_name_ptr, 32)
+        
+        # Temizleme: "C_WeaponAK47" -> "AK47" formatına getirir
+        if raw_name.startswith("C_Weapon"):
+            return raw_name.replace("C_Weapon", "")
+        elif raw_name.startswith("C_"):
+            return raw_name.replace("C_", "")
+        return raw_name
 
 # Global Veri Köprüsü
 radar_data = {"yaw": 0, "local_team": 0, "players": []}
@@ -205,7 +245,7 @@ def run_web_server():
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- 3 BÖLMELİ HTML5 & CSS3 ARAYÜZÜ (MATEMATİKSEL YÖN ONARIMLI) ---
+# --- 3 BÖLMELİ HTML5 & CSS3 ARAYÜZÜ (SİLAH VE PARA SÜTUNLU) ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -224,6 +264,7 @@ HTML_RADAR_UI = """
         .player-row { display: flex; justify-content: space-between; align-items: center; }
         .player-name { font-weight: bold; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .player-money { color: #2ecc71; font-weight: bold; font-family: monospace; }
+        .player-weapon { color: #f39c12; font-size: 12px; font-weight: bold; }
         .hp-bar-bg { width: 100%; background: #222; height: 6px; border-radius: 3px; overflow: hidden; }
         .hp-bar-fill { height: 100%; background: #2ecc71; transition: width 0.1s; }
         .center-panel { width: 44%; display: flex; justify-content: center; align-items: center; position: relative; background: #0d1017; }
@@ -262,7 +303,6 @@ HTML_RADAR_UI = """
             ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
             ctx.stroke();
 
-            // SAKİN DURUŞ: Local Player (Sen) her zaman tam ileriye bakar (Açısı yukarı kilitli)
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
             ctx.moveTo(center, center - 12);
@@ -286,6 +326,7 @@ HTML_RADAR_UI = """
                     </div>
                     <div class="player-row" style="font-size: 11px; color: #a0aab5;">
                         <span>HP: ${player.health}</span>
+                        <span class="player-weapon">${player.weapon}</span>
                     </div>
                     <div class="hp-bar-bg">
                         <div class="hp-bar-fill" style="width: ${hpWidth}%; background-color: ${hpColor};"></div>
@@ -300,8 +341,6 @@ HTML_RADAR_UI = """
                 const data = await response.json();
                 
                 drawRadarGrid();
-                
-                // Yaw açısı radyana çevrilerek 2D düzlem rotasyonu doğru yöne eşitlendi
                 let yawRad = (data.yaw * Math.PI) / 180.0;
 
                 let myTeamHTML = "";
@@ -315,11 +354,9 @@ HTML_RADAR_UI = """
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        // Dönüş matrisi onarıldı: Karakterin baktığı yöne göre düşman konumlandırması
                         let rx = p.dx * Math.cos(yawRad) + p.dy * Math.sin(yawRad);
                         let ry = p.dx * Math.sin(yawRad) - p.dy * Math.cos(yawRad);
 
-                        // Eksen doğrultuları pencerelere göre kalibre edildi
                         let screenX = center + (rx * SCALE);
                         let screenY = center + (ry * SCALE);
 
@@ -376,7 +413,7 @@ def main():
                 time.sleep(0.1)
                 continue
                 
-            localPlayer = Entity(handle, 0, localPlayerPawnAddr)
+            localPlayer = Entity(handle, 0, localPlayerPawnAddr, EntityList)
             local_pos = localPlayer.position
             local_team = localPlayer.team
             view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
@@ -395,7 +432,7 @@ def main():
                 entityPawn = read_memory(handle, listEntry2 + 112 * (entityCPawn & 0x1FF), ctypes.c_uint64)
                 if entityPawn == 0: continue 
 
-                player = Entity(handle, entity, entityPawn)
+                player = Entity(handle, entity, entityPawn, EntityList)
                 player_pos = player.position
 
                 is_local = (entityPawn == localPlayerPawnAddr)
@@ -404,6 +441,7 @@ def main():
                     "name": player.name,
                     "health": player.health,
                     "money": player.money,
+                    "weapon": player.weapon_name, # Yeni eklenen fonksiyon çağrısı
                     "team": player.team,
                     "is_local": is_local,
                     "dx": player_pos["x"] - local_pos["x"],
@@ -424,4 +462,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
