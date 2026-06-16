@@ -8,7 +8,7 @@ import socketserver
 import threading
 import json
 
-# --- Windows Hafıza Okuma API Yapılandırması (64-bit Onarımlı ve Stabilize Edilmiş) ---
+# --- Windows Hafıza Okuma API Yapılandırması (64-bit Onarımlı) ---
 kernel32 = ctypes.windll.kernel32
 
 kernel32.VirtualAlloc.restype = ctypes.c_void_p
@@ -20,7 +20,6 @@ kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 kernel32.GetProcAddress.restype = ctypes.c_void_p
 kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
 
-# 64-bit Taşıma Hatasını Önlemek İçin Tipler Doğru Genişliğe Çekildi
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 
@@ -37,19 +36,27 @@ class OBJECT_ATTRIBUTES(ctypes.Structure):
 class PROCESSENTRY32(ctypes.Structure):
     _fields_ = [
         ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
-        ("th32DefaultHeapID", ctypes.POINTER(wintypes.ULONG)), ("th32ModuleID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", wintypes.DWORD),
         ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
         ("pcPriClassBase", wintypes.LONG), ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_char * 260)
     ]
 
+# 64-bit Çökme Hatasını Düzelten Kritik Struct Düzenlemesi
 class MODULEENTRY32(ctypes.Structure):
     _fields_ = [
-        ("dwSize", wintypes.DWORD), ("th32ModuleID", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
-        ("GlblcntUsage", wintypes.DWORD), ("ProccntUsage", wintypes.DWORD), ("modBaseAddr", ctypes.POINTER(ctypes.c_byte)),
-        ("modBaseSize", wintypes.DWORD), ("hModule", wintypes.HANDLE), ("szModule", ctypes.c_char * 256), ("szExePath", ctypes.c_char * 260)
+        ("dwSize", wintypes.DWORD), 
+        ("th32ModuleID", wintypes.DWORD), 
+        ("th32ProcessID", wintypes.DWORD),
+        ("GlblcntUsage", wintypes.DWORD), 
+        ("ProccntUsage", wintypes.DWORD), 
+        ("modBaseAddr", ctypes.c_void_p), 
+        ("modBaseSize", ctypes.c_size_t), 
+        ("hModule", wintypes.HANDLE), 
+        ("szModule", ctypes.c_char * 256), 
+        ("szExePath", ctypes.c_char * 260)
     ]
 
-# Toolhelp fonksiyonlarının tiplerini globalde bir kez tanımlıyoruz (Çökmeyi önleyen kritik kısım)
+# Fonksiyon tiplerini döngü dışında sabit olarak bir kez tanımlıyoruz
 kernel32.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
 kernel32.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
 kernel32.Module32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
@@ -104,7 +111,6 @@ def get_process_id(process_name):
 
 def get_module_base(pid, module_name):
     TH32CS_SNAPMODULE = 0x00000008
-    # Overflow hatasını önlemek için pid değerini kesin olarak 32-bit tamsayıya maskeliyoruz
     safe_pid = int(pid) & 0xFFFFFFFF
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, safe_pid)
     
@@ -114,7 +120,7 @@ def get_module_base(pid, module_name):
     if kernel32.Module32First(snapshot, ctypes.byref(me)):
         while kernel32.Module32Next(snapshot, ctypes.byref(me)):
             if me.szModule.decode('utf-8', errors='ignore').lower() == module_name.lower():
-                base_addr = ctypes.cast(me.modBaseAddr, ctypes.c_void_p).value
+                base_addr = me.modBaseAddr
                 kernel32.CloseHandle(snapshot)
                 return base_addr
     kernel32.CloseHandle(snapshot)
@@ -132,10 +138,10 @@ def read_string(handle, address, max_len=32):
     bytes_read = ctypes.c_size_t()
     if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), max_len, ctypes.byref(bytes_read)) == 0:
         try:
-            return buffer.value.decode('utf-8', errors='ignore')
+            return buffer.value.decode('utf-8', errors='ignore').split('\x00')[0]
         except:
-            return "Unknown"
-    return "Unknown"
+            return "Player"
+    return "Player"
 
 def read_vec3(handle, address):
     class Vec3(ctypes.Structure):
@@ -171,14 +177,19 @@ class Entity:
     def health(self): return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
     @property
     def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
+    
     @property
     def name(self):
-        if not self.controller: return "Player"
-        return read_string(self.handle, self.controller + Offsets.m_iszPlayerName, 32)
+        if not self.controller: return "LocalPlayer"
+        name_ptr = read_memory(self.handle, self.controller + Offsets.m_iszPlayerName, ctypes.c_uint64)
+        if name_ptr:
+            return read_string(self.handle, name_ptr, 32)
+        return "Player"
+        
     @property
     def money(self):
-        if not self.pawn: return 0
-        money_services = read_memory(self.handle, self.pawn + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
+        if not self.controller: return 0
+        money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
@@ -208,7 +219,6 @@ def run_web_server():
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- YÖN VE BAKIŞ AÇISI DESTEKLİ GELİŞMİŞ WEB PANELİ ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -287,16 +297,16 @@ HTML_RADAR_UI = """
             else if(player.health < 70) hpColor = '#f1c40f';
 
             return `
-                <div class="player-card ${statusClass}">
+                <div class="player-card \${statusClass}">
                     <div class="player-row">
-                        <span class="player-name">${player.name}</span>
-                        <span class="player-money">$${player.money}</span>
+                        <span class="player-name">\${player.name}</span>
+                        <span class="player-money">$\${player.money}</span>
                     </div>
                     <div class="player-row" style="font-size: 11px; color: #a0aab5;">
-                        <span>HP: ${player.health}</span>
+                        <span>HP: \${player.health}</span>
                     </div>
                     <div class="hp-bar-bg">
-                        <div class="hp-bar-fill" style="width: ${hpWidth}%; background-color: ${hpColor};"></div>
+                        <div class="hp-bar-fill" style="width: \${hpWidth}%; background-color: \${hpColor};"></div>
                     </div>
                 </div>
             `;
@@ -428,7 +438,8 @@ def main():
 
                 player_yaw = 0.0
                 if not is_local:
-                    player_yaw = read_memory(handle, entityPawn + 0x3c, ctypes.c_float)
+                    # m_vOldOrigin offsetinin hemen yanındaki m_angEyeAngles yapısı üzerinden yaw derecesi okunur
+                    player_yaw = read_memory(handle, entityPawn + 0x139C, ctypes.c_float)
 
                 temp_players.append({
                     "name": player.name,
@@ -436,7 +447,7 @@ def main():
                     "money": player.money,
                     "team": player.team,
                     "is_local": is_local,
-                    "yaw": player_yaw,
+                    "ya daw": player_yaw,
                     "dx": player_pos["x"] - local_pos["x"],
                     "dy": player_pos["y"] - local_pos["y"]
                 })
@@ -447,7 +458,7 @@ def main():
                 "players": temp_players
             }
             
-            time.sleep(0.02)
+            time.sleep(0.015)
                 
         except Exception:
             time.sleep(0.1)
