@@ -23,7 +23,7 @@ kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 
-# Global C-Struct Tanımlamaları (Hizalama ve Çökmeleri Önlemek İçin Globalde)
+# Global C-Struct Tanımlamaları
 class CLIENT_ID(ctypes.Structure):
     _fields_ = [("UniqueProcess", wintypes.HANDLE), ("UniqueThread", wintypes.HANDLE)]
 
@@ -62,7 +62,6 @@ def _get_ntdll_syscall_address():
 
 _LEGAL_SYSCALL_ADDR = _get_ntdll_syscall_address()
 
-# NtOpenProcess (Syscall ID: 0x0026) & NtReadVirtualMemory (Syscall ID: 0x003F)
 _op_shellcode = b"\x4C\x8B\xD1\xB8\x26\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 _rvm_shellcode = b"\x4C\x8B\xD1\xB8\x3F\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 
@@ -146,15 +145,21 @@ class Offsets:
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
     dwCSGOInput = 0x2356240        
+    dwGlobalVars = 0x17CDCC0       # Zaman hesaplaması için küresel zaman yapısı
+    dwGameRules = 0x19E3A58        # Oyun kuralları katmanı
     m_iTeamNum = 0x3EB             
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
     m_hPlayerPawn = 0x90C          
     m_iszPlayerName = 0x638        
-    m_pInGameMoneyServices = 0x6F8 # Controller bazlı yeni offset
+    m_pInGameMoneyServices = 0x6F8 
     m_iAccount = 0x40              
-    m_pWeaponServices = 0x11A0     # Pawn içindeki silah servisleri
-    m_hActiveWeapon = 0x58         # Aktif silahın handle değeri
+    m_pWeaponServices = 0x11A0     
+    m_hActiveWeapon = 0x58         
+    
+    # Bomba Sistem Ofsetleri
+    m_bBombPlanted = 0x9FD        # GameRules içindeki kurulu olma bayrağı
+    m_flC4Blow = 0xEB0             # PlantedC4 içindeki patlama anı zamanı
 
 class Entity:
     def __init__(self, handle, controller, pawn, entity_list_base=0):
@@ -178,7 +183,6 @@ class Entity:
     @property
     def money(self):
         if not self.controller: return 0
-        # Düzeltme: Para sistemi Pawn değil, tamamen Controller üzerinden okunur.
         money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
@@ -186,24 +190,19 @@ class Entity:
     @property
     def weapon_name(self):
         if not self.pawn or not self.entity_list_base: return "None"
-        
-        # 1. Aşama: Weapon Services katmanına ulaş
         weapon_services = read_memory(self.handle, self.pawn + Offsets.m_pWeaponServices, ctypes.c_uint64)
         if not weapon_services: return "None"
         
-        # 2. Aşama: Aktif silahın handle ID'sini çek
         active_weapon_handle = read_memory(self.handle, weapon_services + Offsets.m_hActiveWeapon, ctypes.c_uint32)
         weapon_index = active_weapon_handle & 0x7FFF
         if not weapon_index: return "None"
         
-        # 3. Aşama: Entity List döngüsü mantığıyla silahın base verisine dallan
         list_entry = read_memory(self.handle, self.entity_list_base + (8 * (weapon_index >> 9)) + 16, ctypes.c_uint64)
         if not list_entry: return "None"
         
         weapon_entity = read_memory(self.handle, list_entry + 120 * (weapon_index & 0x1FF), ctypes.c_uint64)
         if not weapon_entity: return "None"
         
-        # 4. Aşama: Silahın şema isminin adresini çöz (Veri yapılarındaki sabit kimliği)
         v_table = read_memory(self.handle, weapon_entity, ctypes.c_uint64)
         if not v_table: return "None"
         
@@ -211,16 +210,21 @@ class Entity:
         if not type_name_ptr: return "None"
         
         raw_name = read_string(self.handle, type_name_ptr, 32)
-        
-        # Temizleme: "C_WeaponAK47" -> "AK47" formatına getirir
         if raw_name.startswith("C_Weapon"):
             return raw_name.replace("C_Weapon", "")
         elif raw_name.startswith("C_"):
             return raw_name.replace("C_", "")
         return raw_name
 
-# Global Veri Köprüsü
-radar_data = {"yaw": 0, "local_team": 0, "players": []}
+# Global Veri Köprüsü (Bomba verileri entegre edildi)
+radar_data = {
+    "yaw": 0, 
+    "local_team": 0, 
+    "players": [], 
+    "bomb_planted": False, 
+    "bomb_time": 40.0, 
+    "bomb_site": ""
+}
 
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args): return
@@ -245,7 +249,7 @@ def run_web_server():
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- 3 BÖLMELİ HTML5 & CSS3 ARAYÜZÜ (SİLAH VE PARA SÜTUNLU) ---
+# --- 3 BÖLMELİ HTML5 & CSS3 ARAYÜZÜ (BOMBA ZAMANLAYICI EKLENDİ) ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -267,9 +271,16 @@ HTML_RADAR_UI = """
         .player-weapon { color: #f39c12; font-size: 12px; font-weight: bold; }
         .hp-bar-bg { width: 100%; background: #222; height: 6px; border-radius: 3px; overflow: hidden; }
         .hp-bar-fill { height: 100%; background: #2ecc71; transition: width 0.1s; }
-        .center-panel { width: 44%; display: flex; justify-content: center; align-items: center; position: relative; background: #0d1017; }
+        
+        /* Merkez Panel ve Gelişmiş Bomba Tasarımı */
+        .center-panel { width: 44%; display: flex; flex-direction: column; justify-content: center; align-items: center; position: relative; background: #0d1017; gap: 15px; }
         canvas { background: #12161f; border-radius: 50%; border: 4px solid #242b35; box-shadow: 0 0 30px rgba(0,0,0,0.7); }
         .info-label { position: absolute; top: 20px; font-size: 14px; font-weight: bold; color: #526273; letter-spacing: 1px; }
+        
+        .bomb-container { width: 80%; background: #171c26; border: 2px solid #3a1616; padding: 12px; border-radius: 8px; text-align: center; display: none; box-shadow: 0 0 15px rgba(231, 76, 60, 0.2); }
+        .bomb-text { color: #e74c3c; font-weight: bold; font-size: 16px; margin-bottom: 8px; font-family: monospace; letter-spacing: 1px; }
+        .bomb-bar-bg { width: 100%; background: #222; height: 12px; border-radius: 6px; overflow: hidden; border: 1px solid #444; }
+        .bomb-bar-fill { height: 100%; width: 100%; background: #e74c3c; transition: width 0.1s linear; box-shadow: 0 0 8px #e74c3c; }
     </style>
 </head>
 <body>
@@ -279,6 +290,14 @@ HTML_RADAR_UI = """
     </div>
     <div class="panel center-panel">
         <div class="info-label">TACTICAL REALTIME RADAR</div>
+        
+        <div id="bombContainer" class="bomb-container">
+            <div id="bombText" class="bomb-text">⚠️ C4 PLANTED: 40.0s</div>
+            <div class="bomb-bar-bg">
+                <div id="bombBar" class="bomb-bar-fill"></div>
+            </div>
+        </div>
+        
         <canvas id="radar" width="520" height="520"></canvas>
     </div>
     <div class="panel team-panel" style="border-right: none;">
@@ -341,8 +360,25 @@ HTML_RADAR_UI = """
                 const data = await response.json();
                 
                 drawRadarGrid();
-                let yawRad = (data.yaw * Math.PI) / 180.0;
+                
+                // BOMBA GÖRSEL KONTROLÜ
+                const bombContainer = document.getElementById('bombContainer');
+                if (data.bomb_planted && data.bomb_time > 0) {
+                    bombContainer.style.display = 'block';
+                    document.getElementById('bombText').innerText = `⚠️ C4 PLANTED [SITE ${data.bomb_site}]: ${data.bomb_time.toFixed(1)}s`;
+                    // 40 saniyelik bar yüzdesi hesabı
+                    const pct = (data.bomb_time / 40.0) * 100;
+                    document.getElementById('bombBar').style.width = `${pct}%`;
+                    if(data.bomb_time < 10) {
+                        document.getElementById('bombBar').style.backgroundColor = '#ff0000';
+                    } else {
+                        document.getElementById('bombBar').style.backgroundColor = '#e74c3c';
+                    }
+                } else {
+                    bombContainer.style.display = 'none';
+                }
 
+                let yawRad = (data.yaw * Math.PI) / 180.0;
                 let myTeamHTML = "";
                 let enemyTeamHTML = "";
 
@@ -418,6 +454,42 @@ def main():
             local_team = localPlayer.team
             view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
 
+            # BOMBA DURUMUNU SORGULA
+            game_rules = read_memory(handle, base + Offsets.dwGameRules, ctypes.c_uint64)
+            bomb_planted = False
+            bomb_time = 0.0
+            bomb_site = ""
+            
+            if game_rules:
+                bomb_planted = read_memory(handle, game_rules + Offsets.m_bBombPlanted, ctypes.c_bool)
+                
+                if bomb_planted:
+                    # Gömülü PlantedC4 nesnesini Entity List üzerinden yakala
+                    for i in range(65, 1024):  # Dünyadaki nesneler genellikle bu indeks aralığındadır
+                        listEntry = read_memory(handle, EntityList + (8 * (i >> 9)) + 16, ctypes.c_uint64)
+                        if not listEntry: continue
+                        entity = read_memory(handle, listEntry + 120 * (i & 0x1FF), ctypes.c_uint64)
+                        if not entity: continue
+                        
+                        v_table = read_memory(handle, entity, ctypes.c_uint64)
+                        if not v_table: continue
+                        
+                        type_name_ptr = read_memory(handle, v_table + 0x38, ctypes.c_uint64)
+                        raw_name = read_string(self.handle, type_name_ptr, 32) if type_name_ptr else ""
+                        
+                        if "PlantedC4" in raw_name:
+                            # Küresel zaman verilerini çek
+                            global_vars = read_memory(handle, base + Offsets.dwGlobalVars, ctypes.c_uint64)
+                            current_time = read_memory(handle, global_vars + 0x2C, ctypes.c_float) # Örn:currentTime ofseti
+                            blow_time = read_memory(handle, entity + Offsets.m_flC4Blow, ctypes.c_float)
+                            
+                            bomb_time = blow_time - current_time
+                            
+                            # Bomba Bölgesi (Site) Tespiti
+                            site_id = read_memory(handle, entity + 0xEC4, ctypes.c_int) # m_nBombSite
+                            bomb_site = "A" if site_id == 0 else "B"
+                            break
+
             temp_players = []
 
             for i in range(1, 64):
@@ -441,7 +513,7 @@ def main():
                     "name": player.name,
                     "health": player.health,
                     "money": player.money,
-                    "weapon": player.weapon_name, # Yeni eklenen fonksiyon çağrısı
+                    "weapon": player.weapon_name,
                     "team": player.team,
                     "is_local": is_local,
                     "dx": player_pos["x"] - local_pos["x"],
@@ -451,7 +523,10 @@ def main():
             radar_data = {
                 "yaw": view_angles_y,
                 "local_team": local_team,
-                "players": temp_players
+                "players": temp_players,
+                "bomb_planted": bomb_planted,
+                "bomb_time": max(0.0, bomb_time) if bomb_planted else 40.0,
+                "bomb_site": bomb_site
             }
             
             time.sleep(0.02)
