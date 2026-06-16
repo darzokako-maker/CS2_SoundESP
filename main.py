@@ -7,6 +7,7 @@ import http.server
 import socketserver
 import threading
 import json
+import traceback
 
 # --- Windows Hafıza Okuma API Yapılandırması (64-bit Onarımlı) ---
 kernel32 = ctypes.windll.kernel32
@@ -62,6 +63,7 @@ def _get_ntdll_syscall_address():
 
 _LEGAL_SYSCALL_ADDR = _get_ntdll_syscall_address()
 
+# Shellcode Yapılandırmaları
 _op_shellcode = b"\x4C\x8B\xD1\xB8\x26\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 _rvm_shellcode = b"\x4C\x8B\xD1\xB8\x3F\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 
@@ -71,6 +73,8 @@ _IndirectNtOpenProcess = ctypes.WINFUNCTYPE(wintypes.DWORD, ctypes.POINTER(winty
 
 buf_rvm = kernel32.VirtualAlloc(None, len(_rvm_shellcode), 0x1000 | 0x2000, 0x40)
 ctypes.memmove(buf_rvm, _rvm_shellcode, len(_rvm_shellcode))
+
+# DÜZELTME: Çökmeyi önlemek için restype DWORD (NTSTATUS) olarak ayarlandı
 _IndirectNtReadVirtualMemory = ctypes.WINFUNCTYPE(wintypes.DWORD, wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t))(buf_rvm)
 
 def indirect_open_process(pid):
@@ -141,12 +145,11 @@ def read_vec3(handle, address):
         return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
     return {"x": 0, "y": 0, "z": 0}
 
-# --- GÜNCEL CS2 OFSETLERİ VE ŞEMALARI ---
+# --- Ofset Yapılandırması ---
 class Offsets: 
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
     dwCSGOInput = 0x2356240        
-    dwGlobalVars = 0x17CDCC0       
     m_iTeamNum = 0x3EB             
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
@@ -154,18 +157,12 @@ class Offsets:
     m_iszPlayerName = 0x638        
     m_pInGameMoneyServices = 0x6F8 
     m_iAccount = 0x40              
-    m_pWeaponServices = 0x11A0     
-    m_hActiveWeapon = 0x58         
-    dwPlantedC4 = 0x19213A0        
-    m_bBombPlanted = 0x9FD         
-    m_flC4Blow = 0xEB0             
 
 class Entity:
-    def __init__(self, handle, controller, pawn, entity_list_base=0):
+    def __init__(self, handle, controller, pawn):
         self.handle = handle
         self.controller = controller
         self.pawn = pawn
-        self.entity_list_base = entity_list_base
     
     @property
     def team(self): return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
@@ -189,43 +186,8 @@ class Entity:
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
-    @property
-    def weapon_name(self):
-        if not self.pawn or not self.entity_list_base: return "None"
-        weapon_services = read_memory(self.handle, self.pawn + Offsets.m_pWeaponServices, ctypes.c_uint64)
-        if not weapon_services: return "None"
-        
-        active_weapon_handle = read_memory(self.handle, weapon_services + Offsets.m_hActiveWeapon, ctypes.c_uint32)
-        weapon_index = active_weapon_handle & 0x7FFF
-        if not weapon_index: return "None"
-        
-        list_entry = read_memory(self.handle, self.entity_list_base + (8 * (weapon_index >> 9)) + 16, ctypes.c_uint64)
-        if not list_entry: return "None"
-        
-        weapon_entity = read_memory(self.handle, list_entry + 120 * (weapon_index & 0x1FF), ctypes.c_uint64)
-        if not weapon_entity: return "None"
-        
-        v_table = read_memory(self.handle, weapon_entity, ctypes.c_uint64)
-        if not v_table: return "None"
-        
-        type_name_ptr = read_memory(self.handle, v_table + 0x38, ctypes.c_uint64)
-        if not type_name_ptr: return "None"
-        
-        raw_name = read_string(self.handle, type_name_ptr, 32)
-        if raw_name.startswith("C_Weapon"):
-            return raw_name.replace("C_Weapon", "")
-        elif raw_name.startswith("C_"):
-            return raw_name.replace("C_", "")
-        return raw_name
-
-# Global Veri Yapısı
-radar_data = {
-    "yaw": 0, 
-    "local_team": 0, 
-    "players": [],
-    "bomb_planted": False,
-    "bomb_time_left": 0.0
-}
+# Global Veri Köprüsü
+radar_data = {"yaw": 0, "local_team": 0, "players": []}
 
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args): return
@@ -246,11 +208,14 @@ class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
 
 def run_web_server():
     PORT = 8000
-    with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
-        print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
-        httpd.serve_forever()
+    try:
+        with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
+            print(f"[+] Web Arayüzü Başlatıldı: http://localhost:{PORT}")
+            httpd.serve_forever()
+    except Exception as e:
+        print(f"[-] Sunucu başlatma hatası (Port dolu olabilir): {e}")
 
-# --- 3 BÖLMELİ HTML5 & CSS3 TACTICAL RADAR ARAYÜZÜ ---
+# --- HTML ARAYÜZÜ ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -269,18 +234,11 @@ HTML_RADAR_UI = """
         .player-row { display: flex; justify-content: space-between; align-items: center; }
         .player-name { font-weight: bold; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .player-money { color: #2ecc71; font-weight: bold; font-family: monospace; }
-        .player-weapon { color: #f39c12; font-size: 12px; font-weight: bold; }
         .hp-bar-bg { width: 100%; background: #222; height: 6px; border-radius: 3px; overflow: hidden; }
         .hp-bar-fill { height: 100%; background: #2ecc71; transition: width 0.1s; }
-        
-        .center-panel { width: 44%; display: flex; flex-direction: column; justify-content: center; align-items: center; position: relative; background: #0d1017; gap: 15px; }
+        .center-panel { width: 44%; display: flex; justify-content: center; align-items: center; position: relative; background: #0d1017; }
         canvas { background: #12161f; border-radius: 50%; border: 4px solid #242b35; box-shadow: 0 0 30px rgba(0,0,0,0.7); }
         .info-label { position: absolute; top: 20px; font-size: 14px; font-weight: bold; color: #526273; letter-spacing: 1px; }
-        
-        .bomb-container { width: 80%; background: #171c26; border: 2px solid #3a1616; padding: 12px; border-radius: 8px; text-align: center; display: none; box-shadow: 0 0 15px rgba(231, 76, 60, 0.2); }
-        .bomb-text { color: #e74c3c; font-weight: bold; font-size: 16px; margin-bottom: 8px; font-family: monospace; letter-spacing: 1px; }
-        .bomb-bar-bg { width: 100%; background: #222; height: 12px; border-radius: 6px; overflow: hidden; border: 1px solid #444; }
-        .bomb-bar-fill { height: 100%; width: 100%; background: #e74c3c; transition: width 0.1s linear; box-shadow: 0 0 8px #e74c3c; }
     </style>
 </head>
 <body>
@@ -290,14 +248,6 @@ HTML_RADAR_UI = """
     </div>
     <div class="panel center-panel">
         <div class="info-label">TACTICAL REALTIME RADAR</div>
-        
-        <div id="bombContainer" class="bomb-container">
-            <div id="bombText" class="bomb-text">⚠️ C4 PLANTED: 40.0s</div>
-            <div class="bomb-bar-bg">
-                <div id="bombBar" class="bomb-bar-fill"></div>
-            </div>
-        </div>
-        
         <canvas id="radar" width="520" height="520"></canvas>
     </div>
     <div class="panel team-panel" style="border-right: none;">
@@ -324,9 +274,9 @@ HTML_RADAR_UI = """
 
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
-            ctx.moveTo(center, center - 12);
-            ctx.lineTo(center - 8, center + 8);
-            ctx.lineTo(center + 8, center + 8);
+            ctx.moveTo(center, center - 10);
+            ctx.lineTo(center - 7, center + 7);
+            ctx.lineTo(center + 7, center + 7);
             ctx.closePath(); ctx.fill();
         }
 
@@ -345,7 +295,6 @@ HTML_RADAR_UI = """
                     </div>
                     <div class="player-row" style="font-size: 11px; color: #a0aab5;">
                         <span>HP: ${player.health}</span>
-                        <span class="player-weapon">${player.weapon}</span>
                     </div>
                     <div class="hp-bar-bg">
                         <div class="hp-bar-fill" style="width: ${hpWidth}%; background-color: ${hpColor};"></div>
@@ -360,23 +309,8 @@ HTML_RADAR_UI = """
                 const data = await response.json();
                 
                 drawRadarGrid();
-                
-                const bombContainer = document.getElementById('bombContainer');
-                if (data.bomb_planted && data.bomb_time_left > 0) {
-                    bombContainer.style.display = 'block';
-                    document.getElementById('bombText').innerText = `⚠️ C4 PLANTED: ${data.bomb_time_left.toFixed(1)}s`;
-                    const pct = (data.bomb_time_left / 40.0) * 100;
-                    document.getElementById('bombBar').style.width = `${pct}%`;
-                    if(data.bomb_time_left < 10) {
-                        document.getElementById('bombBar').style.backgroundColor = '#ff0000';
-                    } else {
-                        document.getElementById('bombBar').style.backgroundColor = '#e74c3c';
-                    }
-                } else {
-                    bombContainer.style.display = 'none';
-                }
+                const yawRad = (data.yaw * Math.PI) / 180;
 
-                let yawRad = (data.yaw * Math.PI) / 180.0;
                 let myTeamHTML = "";
                 let enemyTeamHTML = "";
 
@@ -388,11 +322,11 @@ HTML_RADAR_UI = """
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        let rx = p.dx * Math.cos(yawRad) + p.dy * Math.sin(yawRad);
-                        let ry = p.dx * Math.sin(yawRad) - p.dy * Math.cos(yawRad);
+                        let rx = p.dx * Math.cos(-yawRad) - p.dy * Math.sin(-yawRad);
+                        let ry = p.dx * Math.sin(-yawRad) + p.dy * Math.cos(-yawRad);
 
                         let screenX = center + (rx * SCALE);
-                        let screenY = center + (ry * SCALE);
+                        let screenY = center - (ry * SCALE);
 
                         let dist = Math.sqrt(Math.pow(screenX - center, 2) + Math.pow(screenY - center, 2));
                         if (dist < center - 10) {
@@ -427,45 +361,33 @@ def main():
 
     handle = indirect_open_process(pid)
     if not handle:
-        print("\n[-] Süreç baglantisi (Handle) alinmadi.")
+        print("\n[-] Süreç bağlantısı (Handle) alınamadı. Yönetici olarak çalıştırmayı deneyin.")
         return
         
     base = get_module_base(pid, "client.dll")
+    if not base:
+        print("\n[-] client.dll modülü bulunamadı.")
+        return
 
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
+
+    print("\n[+] Taktiksel Veri Hafıza Motoru Çalışıyor... (Indirect Syscall)")
 
     while True:
         try:
             EntityList = read_memory(handle, base + Offsets.dwEntityList, ctypes.c_uint64)
             localPlayerPawnAddr = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
             csgoInput = read_memory(handle, base + Offsets.dwCSGOInput, ctypes.c_uint64)
-            globalVars = read_memory(handle, base + Offsets.dwGlobalVars, ctypes.c_uint64)
             
-            if not localPlayerPawnAddr or not csgoInput or not globalVars:
+            if not localPlayerPawnAddr or not csgoInput:
                 time.sleep(0.1)
                 continue
                 
-            localPlayer = Entity(handle, 0, localPlayerPawnAddr, base)
+            localPlayer = Entity(handle, 0, localPlayerPawnAddr)
             local_pos = localPlayer.position
             local_team = localPlayer.team
             view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
-            current_time = read_memory(handle, globalVars + 0x2C, ctypes.c_float)
-
-            bomb_planted = False
-            bomb_time_left = 0.0
-            planted_c4_base = read_memory(handle, base + Offsets.dwPlantedC4, ctypes.c_uint64)
-            
-            if planted_c4_base:
-                planted_c4 = read_memory(handle, planted_c4_base, ctypes.c_uint64)
-                if planted_c4:
-                    is_planted = read_memory(handle, planted_c4 + Offsets.m_bBombPlanted, ctypes.c_bool)
-                    if is_planted:
-                        blow_time = read_memory(handle, planted_c4 + Offsets.m_flC4Blow, ctypes.c_float)
-                        calc_time = blow_time - current_time
-                        if calc_time > 0:
-                            bomb_planted = True
-                            bomb_time_left = calc_time
 
             temp_players = []
 
@@ -481,8 +403,9 @@ def main():
                 entityPawn = read_memory(handle, listEntry2 + 112 * (entityCPawn & 0x1FF), ctypes.c_uint64)
                 if entityPawn == 0: continue 
 
-                player = Entity(handle, entity, entityPawn, base)
+                player = Entity(handle, entity, entityPawn)
                 player_pos = player.position
+
                 is_local = (entityPawn == localPlayerPawnAddr)
 
                 temp_players.append({
@@ -490,7 +413,6 @@ def main():
                     "health": player.health,
                     "money": player.money,
                     "team": player.team,
-                    "weapon": player.weapon_name,
                     "is_local": is_local,
                     "dx": player_pos["x"] - local_pos["x"],
                     "dy": player_pos["y"] - local_pos["y"]
@@ -499,17 +421,21 @@ def main():
             radar_data = {
                 "yaw": view_angles_y,
                 "local_team": local_team,
-                "players": temp_players,
-                "bomb_planted": bomb_planted,
-                "bomb_time_left": bomb_time_left
+                "players": temp_players
             }
             
-            time.sleep(0.015)
+            time.sleep(0.02)
                 
         except Exception:
             time.sleep(0.1)
             continue
 
 if __name__ == "__main__":
-    main()
-   
+    try:
+        main()
+    except Exception as e:
+        print("\n[CRITICAL ERROR] Program beklenmedik bir hata nedeniyle çöktü:")
+        traceback.print_exc()
+        print("\nKapanmayı engellemek ve hatayı okuyabilmeniz için bekleniyor. Enter'a basın...")
+        input()
+        
