@@ -1,36 +1,39 @@
-name: CS2 Web Radar EXE Builder
+name: Build CS2 Tactical Radar
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "main", "master" ]
+    branches: [ "main" ]
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-    - name: Depoyu Klonla (Checkout)
+    - name: Checkout Repository
       uses: actions/checkout@v4
 
-    - name: Python Kurulumu
+    - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-color: '3.11'
 
-    - name: PyInstaller Aracini Yukle
+    - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller==6.5.0
+        pip install pyinstaller
 
-    - name: Web Radar Kodunu Tek Parca EXE Olarak Derle
+    - name: Build Hidden Admin EXE with Maps Embedded
       run: |
-        pyinstaller --noconsole  --onefile --clean --name="CS2_Web_Radar" main.py
+        # --noconsole: Konsol ekranını tamamen gizler.
+        # --uac-admin: Hafıza okumak için gereken Yönetici İznini (Admin) otomatik ister.
+        # --add-data: Ana dizindeki tüm .png harita görsellerini exe'nin içine paketler.
+        pyinstaller --noconsole --onefile --uac-admin --add-data "*.png;." main.py
 
-    - name: Uretilen Web Radar EXE Dosyasini Paylas
+    - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: CS2_Web_Radar_Executable
-        path: dist/CS2_Web_Radar.exe
+        name: CS2-Tactical-Radar-EXE
+        path: dist/main.exe
         
