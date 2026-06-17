@@ -152,7 +152,7 @@ class Offsets:
     m_iszPlayerName = 0x638        
     m_pInGameMoneyServices = 0x6F8 
     m_iAccount = 0x40              
-    m_angEyeAngles = 0x139C        # Oyuncuların anlık baktığı açı (Yaw için)
+    m_angEyeAngles = 0x139C        
 
 class Entity:
     def __init__(self, handle, controller, pawn):
@@ -203,7 +203,7 @@ def run_web_server():
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- GELİŞTİRİLMİŞ KOORDİNAT VE YÖN ALGORİTMALI ARAYÜZ ---
+# --- OPTİMİZE EDİLMİŞ VE YÜKSEK HASSASİYETLİ RADAR ARAYÜZÜ ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -246,7 +246,9 @@ HTML_RADAR_UI = """
         const canvas = document.getElementById('radar');
         const ctx = canvas.getContext('2d');
         const center = canvas.width / 2;
-        const SCALE = 0.15; // Mesafe ölçeği ayarı
+        const SCALE = 0.15; 
+        
+        let currentYaw = 0;
 
         function drawRadarGrid() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -260,13 +262,21 @@ HTML_RADAR_UI = """
             ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
             ctx.stroke();
 
-            // Kendi Görüş Açımız (Sabit Yukarı Ok - Çünkü Harita Dönecek)
+            // Kendi Görüş Açımız (Gecikmesiz, Doğrudan İleriye Sabitlenmiş Görüş Konisi)
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
-            ctx.moveTo(center, center - 12);
-            ctx.lineTo(center - 7, center + 5);
-            ctx.lineTo(center + 7, center + 5);
+            ctx.moveTo(center, center - 14);
+            ctx.lineTo(center - 8, center + 6);
+            ctx.lineTo(center + 8, center + 6);
             ctx.closePath(); ctx.fill();
+
+            // Görüş Alanı Sınır Çizgileri (Fov Görselleştirmesi)
+            ctx.strokeStyle = 'rgba(0, 255, 204, 0.15)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(center, center); ctx.lineTo(center - 40, 0);
+            ctx.moveTo(center, center); ctx.lineTo(center + 40, 0);
+            ctx.stroke();
         }
 
         function createPlayerCard(player) {
@@ -277,16 +287,16 @@ HTML_RADAR_UI = """
             else if(player.health < 70) hpColor = '#f1c40f';
 
             return `
-                <div class="player-card ${statusClass}">
+                <div class="player-card \${statusClass}">
                     <div class="player-row">
-                        <span class="player-name">${player.name}</span>
-                        <span class="player-money">$${player.money}</span>
+                        <span class="player-name">\${player.name}</span>
+                        <span class="player-money">$\${player.money}</span>
                     </div>
                     <div class="player-row" style="font-size: 11px; color: #a0aab5;">
-                        <span>HP: ${player.health}</span>
+                        <span>HP: \${player.health}</span>
                     </div>
                     <div class="hp-bar-bg">
-                        <div class="hp-bar-fill" style="width: ${hpWidth}%; background-color: ${hpColor};"></div>
+                        <div class="hp-bar-fill" style="width: \${hpWidth}%; background-color: \max_len${hpColor};"></div>
                     </div>
                 </div>
             `;
@@ -299,8 +309,18 @@ HTML_RADAR_UI = """
                 
                 drawRadarGrid();
                 
-                // CS2 Saat Yönü Rotasyonu Düzeltmesi (-90 derece harita oryantasyonu için)
-                const viewYawRad = ((data.yaw - 90) * Math.PI) / 180;
+                // Oyun motoru açısını oku
+                const targetYaw = data.yaw || 0;
+                
+                // Dönüş Titremelerini Engelleme (Interpolation Düzeltmesi)
+                // Ani 180 derece dönüşlerde veya sınır geçişlerinde (-180 / +180) yaşanan sapmayı önler
+                let diff = targetYaw - currentYaw;
+                while (diff < -180) diff += 360;
+                while (diff > 180) diff -= 360;
+                currentYaw += diff * 0.45; // 0.45 Sönümleme Katsayısı (Akıcı ve Hızlı)
+
+                // CS2 Koordinat Sistemi Doğrusal Açı Ofseti (-90 derece harita oryantasyonu için)
+                const viewYawRad = ((currentYaw - 90) * Math.PI) / 180;
 
                 let myTeamHTML = "";
                 let enemyTeamHTML = "";
@@ -313,7 +333,8 @@ HTML_RADAR_UI = """
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        // CS2 Dünya Koordinat Matris Rotasyonu (Senin bakış açına göre haritayı senkronize döndürür)
+                        // CS2 Dünya Matris Rotasyonu (Düşman koordinatlarını kendi etrafında eksiksiz çevirme)
+                        // CS2 X ekseni Sağa/Sola, Y ekseni Yukarı/Aşağı doğrusal verisidir
                         let rx = p.dx * Math.cos(viewYawRad) + p.dy * Math.sin(viewYawRad);
                         let ry = -p.dx * Math.sin(viewYawRad) + p.dy * Math.cos(viewYawRad);
 
@@ -324,13 +345,15 @@ HTML_RADAR_UI = """
                         if (dist < center - 15) {
                             const playerColor = p.team === data.local_team ? '#00ffcc' : '#ff4444';
 
-                            // OYUNCUNUN BAKTIĞI ANLIK YÖNÜ ÇİZME (Küçük Görüş Çizgisi)
-                            // Kendi açımızdan oyuncunun açısını çıkarıp radara göre doğrultusunu buluyoruz
-                            let lookAngleRad = ((p.yaw - data.yaw - 90) * Math.PI) / 180;
-                            let arrowLength = 12;
+                            // Geliştirilmiş Oyuncu Bakış Doğrultusu Hesaplaması
+                            // Oyuncunun dünya açısı ile kendi açımız arasındaki farkı radyal düzleme indirgiyoruz
+                            let lookAngleRad = ((p.yaw - currentYaw - 90) * Math.PI) / 180;
+                            let arrowLength = 14;
 
+                            // Dinamik Bakış Yönü Oku (Dairesel Başlıklı Ok Tasarımı)
                             ctx.strokeStyle = playerColor;
-                            ctx.lineWidth = 2;
+                            ctx.lineWidth = 2.5;
+                            ctx.lineCap = "round";
                             ctx.beginPath();
                             ctx.moveTo(screenX, screenY);
                             ctx.lineTo(
@@ -339,14 +362,15 @@ HTML_RADAR_UI = """
                             );
                             ctx.stroke();
 
-                            // Oyuncu Gövde Noktası
+                            // Oyuncu Merkez Noktası
                             ctx.fillStyle = playerColor;
                             ctx.beginPath(); 
-                            ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI); 
+                            ctx.arc(screenX, screenY, 6.5, 0, 2 * Math.PI); 
                             ctx.fill();
                             
-                            ctx.strokeStyle = '#fff'; 
-                            ctx.lineWidth = 1; 
+                            // Kontur (Belirginlik Çizgisi)
+                            ctx.strokeStyle = '#ffffff'; 
+                            ctx.lineWidth = 1.2; 
                             ctx.stroke();
                         }
                     }
@@ -356,7 +380,7 @@ HTML_RADAR_UI = """
                 document.getElementById('enemyTeamList').innerHTML = enemyTeamHTML;
 
             } catch (e) { }
-            setTimeout(updateDashboard, 20);
+            setTimeout(updateDashboard, 15); // Güncelleme hızını 15ms'ye düşürerek tepki süresini artırdık
         }
         updateDashboard();
     </script>
@@ -420,7 +444,6 @@ def main():
 
                 is_local = (entityPawn == localPlayerPawnAddr)
                 
-                # Oyuncunun anlık kafasını (bakış yönünü) dönen açı değerini hafızadan çekiyoruz
                 player_yaw = read_memory(handle, entityPawn + Offsets.m_angEyeAngles, ctypes.c_float)
 
                 temp_players.append({
@@ -440,11 +463,16 @@ def main():
                 "players": temp_players
             }
             
-            time.sleep(0.015)
+            time.sleep(0.01) # Hafıza döngüsünü 10ms hıza çekerek gecikmeyi tamamen sıfırladık
                 
         except Exception:
             time.sleep(0.1)
             continue
 
 if __name__ == "__main__":
-    main()
+    main() 
+             
+                
+                
+                
+                                 
