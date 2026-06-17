@@ -23,7 +23,6 @@ kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 
-# Global C-Struct Tanımlamaları
 class CLIENT_ID(ctypes.Structure):
     _fields_ = [("UniqueProcess", wintypes.HANDLE), ("UniqueThread", wintypes.HANDLE)]
 
@@ -36,30 +35,17 @@ class OBJECT_ATTRIBUTES(ctypes.Structure):
 class PROCESSENTRY32(ctypes.Structure):
     _fields_ = [
         ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
-        ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.POINTER(wintypes.ULONG)), ("th32ModuleID", wintypes.DWORD),
         ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
         ("pcPriClassBase", wintypes.LONG), ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_char * 260)
     ]
 
 class MODULEENTRY32(ctypes.Structure):
     _fields_ = [
-        ("dwSize", wintypes.DWORD), 
-        ("th32ModuleID", wintypes.DWORD), 
-        ("th32ProcessID", wintypes.DWORD),
-        ("GlblcntUsage", wintypes.DWORD), 
-        ("ProccntUsage", wintypes.DWORD), 
-        ("modBaseAddr", ctypes.c_void_p), # 64-bit taşmaları önlemek için void_p kullanımı
-        ("modBaseSize", ctypes.c_size_t), 
-        ("hModule", wintypes.HANDLE), 
-        ("szModule", ctypes.c_char * 256), 
-        ("szExePath", ctypes.c_char * 260)
+        ("dwSize", wintypes.DWORD), ("th32ModuleID", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+        ("GlblcntUsage", wintypes.DWORD), ("ProccntUsage", wintypes.DWORD), ("modBaseAddr", ctypes.POINTER(ctypes.c_byte)),
+        ("modBaseSize", wintypes.DWORD), ("hModule", wintypes.HANDLE), ("szModule", ctypes.c_char * 256), ("szExePath", ctypes.c_char * 260)
     ]
-
-# Fonksiyon tiplerini döngü dışında tanımlama
-kernel32.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
-kernel32.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
-kernel32.Module32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
-kernel32.Module32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
 
 # --- MEŞRU SYSCALL BULUCU VE ASSEMBLY KÖPRÜLERİ ---
 def _get_ntdll_syscall_address():
@@ -99,6 +85,8 @@ def get_process_id(process_name):
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     pe = PROCESSENTRY32()
     pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
+    kernel32.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
+    kernel32.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
     
     if kernel32.Process32First(snapshot, ctypes.byref(pe)):
         while kernel32.Process32Next(snapshot, ctypes.byref(pe)):
@@ -110,15 +98,16 @@ def get_process_id(process_name):
 
 def get_module_base(pid, module_name):
     TH32CS_SNAPMODULE = 0x00000008
-    safe_pid = int(pid) & 0xFFFFFFFF
-    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, safe_pid)
+    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid)
     me = MODULEENTRY32()
     me.dwSize = ctypes.sizeof(MODULEENTRY32)
+    kernel32.Module32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
+    kernel32.Module32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
     
     if kernel32.Module32First(snapshot, ctypes.byref(me)):
         while kernel32.Module32Next(snapshot, ctypes.byref(me)):
             if me.szModule.decode('utf-8', errors='ignore').lower() == module_name.lower():
-                base_addr = me.modBaseAddr
+                base_addr = ctypes.cast(me.modBaseAddr, ctypes.c_void_p).value
                 kernel32.CloseHandle(snapshot)
                 return base_addr
     kernel32.CloseHandle(snapshot)
@@ -151,7 +140,7 @@ def read_vec3(handle, address):
         return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
     return {"x": 0, "y": 0, "z": 0}
 
-# --- Ofset Yapılandırması ---
+# --- 2026 Ofsetleri ---
 class Offsets: 
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
@@ -163,6 +152,7 @@ class Offsets:
     m_iszPlayerName = 0x638        
     m_pInGameMoneyServices = 0x6F8 
     m_iAccount = 0x40              
+    m_angEyeAngles = 0x139C        # Oyuncuların anlık baktığı açı (Yaw için)
 
 class Entity:
     def __init__(self, handle, controller, pawn):
@@ -171,38 +161,23 @@ class Entity:
         self.pawn = pawn
     
     @property
-    def team(self): 
-        return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
-        
+    def team(self): return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
     @property
-    def health(self): 
-        return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
-        
+    def health(self): return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
     @property
-    def position(self): 
-        return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
-    
+    def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
     @property
     def name(self):
-        if not self.controller: 
-            return "LocalPlayer"
-        # Pointer zincirini korumak için doğrudan adresten güvenli okuma köprüsü
+        if not self.controller: return "Player"
         name_ptr = read_memory(self.handle, self.controller + Offsets.m_iszPlayerName, ctypes.c_uint64)
-        if name_ptr:
-            return read_string(self.handle, name_ptr, 32)
-        return "Player"
-        
+        return read_string(self.handle, name_ptr, 32) if name_ptr else "Player"
     @property
     def money(self):
-        if not self.controller: 
-            return 0
-        # InGameMoneyServices işaretçisini alternatif veri doğrulaması ile kontrol ederek çekme
+        if not self.controller: return 0
         money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
-        if not money_services: 
-            return 0
+        if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
-# Küresel Veri Paylaşım Nesnesi
 radar_data = {"yaw": 0, "local_team": 0, "players": []}
 
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
@@ -228,7 +203,7 @@ def run_web_server():
         print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
         httpd.serve_forever()
 
-# --- Yenilenmiş Matematiksel Dönüşüm ve Yön Destekli UI ---
+# --- GELİŞTİRİLMİŞ KOORDİNAT VE YÖN ALGORİTMALI ARAYÜZ ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -271,7 +246,7 @@ HTML_RADAR_UI = """
         const canvas = document.getElementById('radar');
         const ctx = canvas.getContext('2d');
         const center = canvas.width / 2;
-        const SCALE = 0.16; // Harita ölçeklendirme çarpanı
+        const SCALE = 0.15; // Mesafe ölçeği ayarı
 
         function drawRadarGrid() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -285,19 +260,13 @@ HTML_RADAR_UI = """
             ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
             ctx.stroke();
 
-            // Merkezdeki yerel oyuncu göstergesi (Yukarı bakan ok)
+            // Kendi Görüş Açımız (Sabit Yukarı Ok - Çünkü Harita Dönecek)
             ctx.fillStyle = '#00ffcc';
             ctx.beginPath();
             ctx.moveTo(center, center - 12);
-            ctx.lineTo(center - 8, center + 6);
-            ctx.lineTo(center + 8, center + 6);
+            ctx.lineTo(center - 7, center + 5);
+            ctx.lineTo(center + 7, center + 5);
             ctx.closePath(); ctx.fill();
-
-            ctx.strokeStyle = 'rgba(0, 255, 204, 0.3)';
-            ctx.beginPath();
-            ctx.moveTo(center, center);
-            ctx.lineTo(center, center - 60);
-            ctx.stroke();
         }
 
         function createPlayerCard(player) {
@@ -308,16 +277,16 @@ HTML_RADAR_UI = """
             else if(player.health < 70) hpColor = '#f1c40f';
 
             return `
-                <div class="player-card \${statusClass}">
+                <div class="player-card ${statusClass}">
                     <div class="player-row">
-                        <span class="player-name">\${player.name}</span>
-                        <span class="player-money">$\${player.money}</span>
+                        <span class="player-name">${player.name}</span>
+                        <span class="player-money">$${player.money}</span>
                     </div>
                     <div class="player-row" style="font-size: 11px; color: #a0aab5;">
-                        <span>HP: \${player.health}</span>
+                        <span>HP: ${player.health}</span>
                     </div>
                     <div class="hp-bar-bg">
-                        <div class="hp-bar-fill" style="width: \${hpWidth}%; background-color: \${hpColor};"></div>
+                        <div class="hp-bar-fill" style="width: ${hpWidth}%; background-color: ${hpColor};"></div>
                     </div>
                 </div>
             `;
@@ -330,8 +299,8 @@ HTML_RADAR_UI = """
                 
                 drawRadarGrid();
                 
-                // Yerel oyuncunun bakış açısını (Yönünü) radyana çevirip 90 derece kalibre ediyoruz
-                const localYawRad = ((data.yaw - 90) * Math.PI) / 180;
+                // CS2 Saat Yönü Rotasyonu Düzeltmesi (-90 derece harita oryantasyonu için)
+                const viewYawRad = ((data.yaw - 90) * Math.PI) / 180;
 
                 let myTeamHTML = "";
                 let enemyTeamHTML = "";
@@ -344,41 +313,41 @@ HTML_RADAR_UI = """
                     }
 
                     if (p.health > 0 && !p.is_local) {
-                        // Oyun dünyasındaki X/Y farklarını yerel oyuncunun açısına göre döndürme matrisi
-                        let rx = p.dx * Math.cos(localYawRad) + p.dy * Math.sin(localYawRad);
-                        let ry = -p.dx * Math.sin(localYawRad) + p.dy * Math.cos(localYawRad);
+                        // CS2 Dünya Koordinat Matris Rotasyonu (Senin bakış açına göre haritayı senkronize döndürür)
+                        let rx = p.dx * Math.cos(viewYawRad) + p.dy * Math.sin(viewYawRad);
+                        let ry = -p.dx * Math.sin(viewYawRad) + p.dy * Math.cos(viewYawRad);
 
                         let screenX = center + (rx * SCALE);
                         let screenY = center + (ry * SCALE);
 
                         let dist = Math.sqrt(Math.pow(screenX - center, 2) + Math.pow(screenY - center, 2));
-                        if (dist < center - 10) {
-                            const isEnemy = p.team !== data.local_team;
-                            const mainColor = isEnemy ? '#ff4444' : '#00ffcc';
-                            
-                            // Diğer oyuncuların bakış konilerini senkronize etme matematiği
-                            let playerYawRad = ((p.yaw - data.yaw - 90) * Math.PI) / 180;
-                            const fovAngle = 45 * Math.PI / 180;
-                            const coneLength = 22;
+                        if (dist < center - 15) {
+                            const playerColor = p.team === data.local_team ? '#00ffcc' : '#ff4444';
 
-                            ctx.fillStyle = isEnemy ? 'rgba(255, 68, 68, 0.15)' : 'rgba(0, 255, 204, 0.15)';
+                            // OYUNCUNUN BAKTIĞI ANLIK YÖNÜ ÇİZME (Küçük Görüş Çizgisi)
+                            // Kendi açımızdan oyuncunun açısını çıkarıp radara göre doğrultusunu buluyoruz
+                            let lookAngleRad = ((p.yaw - data.yaw - 90) * Math.PI) / 180;
+                            let arrowLength = 12;
+
+                            ctx.strokeStyle = playerColor;
+                            ctx.lineWidth = 2;
                             ctx.beginPath();
                             ctx.moveTo(screenX, screenY);
-                            ctx.arc(screenX, screenY, coneLength, playerYawRad - fovAngle / 2, playerYawRad + fovAngle / 2);
-                            ctx.closePath();
-                            ctx.fill();
-
-                            ctx.strokeStyle = mainColor;
-                            ctx.lineWidth = 1.5;
-                            ctx.beginPath();
-                            ctx.moveTo(screenX, screenY);
-                            ctx.lineTo(screenX + coneLength * Math.cos(playerYawRad), screenY + coneLength * Math.sin(playerYawRad));
+                            ctx.lineTo(
+                                screenX + Math.cos(lookAngleRad) * arrowLength,
+                                screenY + Math.sin(lookAngleRad) * arrowLength
+                            );
                             ctx.stroke();
 
-                            // Oyuncu Noktası
-                            ctx.fillStyle = mainColor;
-                            ctx.beginPath(); ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI); ctx.fill();
-                            ctx.strokeStyle = '#fff'; ctx.lineWidth = 1; ctx.stroke();
+                            // Oyuncu Gövde Noktası
+                            ctx.fillStyle = playerColor;
+                            ctx.beginPath(); 
+                            ctx.arc(screenX, screenY, 6, 0, 2 * Math.PI); 
+                            ctx.fill();
+                            
+                            ctx.strokeStyle = '#fff'; 
+                            ctx.lineWidth = 1; 
+                            ctx.stroke();
                         }
                     }
                 });
@@ -415,7 +384,7 @@ def main():
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    print("[+] Taktiksel Veri Hafıza Motoru Çalışıyor... (Indirect Syscall)")
+    print("[+] Taktiksel Veri Hafıza Motoru Çalışıyor... (Kusursuz Açı Senkronizasyonu)")
 
     while True:
         try:
@@ -446,18 +415,13 @@ def main():
                 entityPawn = read_memory(handle, listEntry2 + 112 * (entityCPawn & 0x1FF), ctypes.c_uint64)
                 if entityPawn == 0: continue 
 
-                # Alternatif yöntem: İsim ve Para verilerini doğrulamak için controller nesnesini saklama
                 player = Entity(handle, entity, entityPawn)
                 player_pos = player.position
 
                 is_local = (entityPawn == localPlayerPawnAddr)
-
-                player_yaw = 0.0
-                if not is_local:
-                    # Göz açısı (m_angEyeAngles.y) offsetini ekleyerek harita üzerindeki bakış yönünü eşitleme
-                    player_yaw = read_memory(handle, entityPawn + 0x139C, ctypes.c_float)
-                else:
-                    player_yaw = view_angles_y
+                
+                # Oyuncunun anlık kafasını (bakış yönünü) dönen açı değerini hafızadan çekiyoruz
+                player_yaw = read_memory(handle, entityPawn + Offsets.m_angEyeAngles, ctypes.c_float)
 
                 temp_players.append({
                     "name": player.name,
