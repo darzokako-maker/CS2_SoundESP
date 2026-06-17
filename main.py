@@ -7,21 +7,10 @@ import http.server
 import socketserver
 import threading
 import json
+import os
 
-# --- Windows Hafıza Okuma API Yapılandırması (64-bit Onarımlı) ---
+# --- Windows Hafıza Okuma API Yapılandırması ---
 kernel32 = ctypes.windll.kernel32
-
-kernel32.VirtualAlloc.restype = ctypes.c_void_p
-kernel32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
-
-kernel32.GetModuleHandleW.restype = wintypes.HMODULE
-kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
-
-kernel32.GetProcAddress.restype = ctypes.c_void_p
-kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
-
-kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 
 class CLIENT_ID(ctypes.Structure):
     _fields_ = [("UniqueProcess", wintypes.HANDLE), ("UniqueThread", wintypes.HANDLE)]
@@ -47,20 +36,16 @@ class MODULEENTRY32(ctypes.Structure):
         ("modBaseSize", wintypes.DWORD), ("hModule", wintypes.HANDLE), ("szModule", ctypes.c_char * 256), ("szExePath", ctypes.c_char * 260)
     ]
 
-# --- MEŞRU SYSCALL BULUCU VE ASSEMBLY KÖPRÜLERİ ---
 def _get_ntdll_syscall_address():
     h_ntdll = kernel32.GetModuleHandleW("ntdll.dll")
     nt_read_addr = kernel32.GetProcAddress(h_ntdll, b"NtReadVirtualMemory")
-    if not nt_read_addr:
-        return 0
+    if not nt_read_addr: return 0
     for offset in range(0, 100):
         ptr = nt_read_addr + offset
-        if ctypes.string_at(ptr, 2) == b"\x0F\x05":
-            return ptr
+        if ctypes.string_at(ptr, 2) == b"\x0F\x05": return ptr
     return nt_read_addr + 0x12
 
 _LEGAL_SYSCALL_ADDR = _get_ntdll_syscall_address()
-
 _op_shellcode = b"\x4C\x8B\xD1\xB8\x26\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 _rvm_shellcode = b"\x4C\x8B\xD1\xB8\x3F\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 
@@ -81,13 +66,11 @@ def indirect_open_process(pid):
     return None
 
 def get_process_id(process_name):
-    TH32CS_SNAPPROCESS = 0x00000002
-    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
     pe = PROCESSENTRY32()
     pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
     kernel32.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
     kernel32.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
-    
     if kernel32.Process32First(snapshot, ctypes.byref(pe)):
         while kernel32.Process32Next(snapshot, ctypes.byref(pe)):
             if pe.szExeFile.decode('utf-8', errors='ignore').lower() == process_name.lower():
@@ -97,13 +80,11 @@ def get_process_id(process_name):
     return None
 
 def get_module_base(pid, module_name):
-    TH32CS_SNAPMODULE = 0x00000008
-    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid)
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000008, pid)
     me = MODULEENTRY32()
     me.dwSize = ctypes.sizeof(MODULEENTRY32)
     kernel32.Module32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
     kernel32.Module32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
-    
     if kernel32.Module32First(snapshot, ctypes.byref(me)):
         while kernel32.Module32Next(snapshot, ctypes.byref(me)):
             if me.szModule.decode('utf-8', errors='ignore').lower() == module_name.lower():
@@ -124,11 +105,7 @@ def read_string(handle, address, max_len=32):
     buffer = ctypes.create_string_buffer(max_len)
     bytes_read = ctypes.c_size_t()
     if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), max_len, ctypes.byref(bytes_read)) == 0:
-        try:
-            res = buffer.value.decode('utf-8', errors='ignore').split('\x00')[0]
-            return res if res else "Player"
-        except:
-            return "Player"
+        return buffer.value.decode('utf-8', errors='ignore').split('\x00')[0]
     return "Player"
 
 def read_vec3(handle, address):
@@ -140,11 +117,13 @@ def read_vec3(handle, address):
         return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
     return {"x": 0, "y": 0, "z": 0}
 
-# --- 2026 Ofsetleri ---
-class Offsets: 
+# --- CS2 2026 Ofsetleri ---
+class Offsets:
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
     dwCSGOInput = 0x2356240        
+    dwGlobalVars = 0x17CD0F0       
+    dwMatchmakingGameDLL = 0x33A380 # Harita ismini yakalamak için engine modülü bağıntısı
     m_iTeamNum = 0x3EB             
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
@@ -154,31 +133,7 @@ class Offsets:
     m_iAccount = 0x40              
     m_angEyeAngles = 0x139C        
 
-class Entity:
-    def __init__(self, handle, controller, pawn):
-        self.handle = handle
-        self.controller = controller
-        self.pawn = pawn
-    
-    @property
-    def team(self): return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
-    @property
-    def health(self): return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
-    @property
-    def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
-    @property
-    def name(self):
-        if not self.controller: return "Player"
-        name_ptr = read_memory(self.handle, self.controller + Offsets.m_iszPlayerName, ctypes.c_uint64)
-        return read_string(self.handle, name_ptr, 32) if name_ptr else "Player"
-    @property
-    def money(self):
-        if not self.controller: return 0
-        money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
-        if not money_services: return 0
-        return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
-
-radar_data = {"yaw": 0, "local_team": 0, "players": []}
+radar_data = {"map_name": "de_mirage", "yaw": 0, "local_team": 0, "players": []}
 
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args): return
@@ -189,6 +144,16 @@ class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps(radar_data).encode('utf-8'))
+        elif self.path in ['/de_dust2.png', '/de_mirage.png', '/de_inferno.png', '/de_nuke.png']:
+            filename = self.path[1:]
+            if os.path.exists(filename):
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/png')
+                self.end_headers()
+                with open(filename, 'rb') as f:
+                    self.wfile.write(f.read())
+            else:
+                self.send_error(404)
         elif self.path == '/' or self.path == '/index.html':
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -197,192 +162,167 @@ class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
         else:
             self.send_error(404)
 
-def run_web_server():
-    PORT = 8000
-    with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
-        print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
-        httpd.serve_forever()
-
-# --- OPTİMİZE EDİLMİŞ VE YÜKSEK HASSASİYETLİ RADAR ARAYÜZÜ ---
+# --- WEB UI & KUSURSUZ COORD-MAP HARMANLAMA MOTORU ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>CS2 Tactical Web Dashboard</title>
+    <title>CS2 Radar Engine</title>
     <style>
-        body { margin: 0; background: #0b0e14; display: flex; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; height: 100vh; overflow: hidden; }
+        body { margin: 0; background: #0b0e14; display: flex; color: #fff; font-family: 'Segoe UI', sans-serif; height: 100vh; overflow: hidden; }
         .panel { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; padding: 20px; background: #11141c; border-right: 2px solid #1c212e; }
-        .team-panel { width: 28%; overflow-y: auto; }
-        .team-title { font-size: 18px; font-weight: bold; padding-bottom: 10px; margin-bottom: 15px; border-bottom: 2px solid; text-align: center; }
+        .team-panel { width: 25%; overflow-y: auto; }
+        .team-title { font-size: 16px; font-weight: bold; padding-bottom: 10px; margin-bottom: 15px; border-bottom: 2px solid; text-align: center; }
         .team-my { color: #00ffcc; border-color: #00ffcc; }
         .team-enemy { color: #ff4444; border-color: #ff4444; }
-        .player-card { background: #171c26; border-radius: 6px; padding: 12px; margin-bottom: 10px; border-left: 5px solid #8a96a3; display: flex; flex-direction: column; gap: 6px; }
+        .player-card { background: #171c26; border-radius: 6px; padding: 10px; margin-bottom: 8px; border-left: 5px solid #8a96a3; }
         .player-card.alive { border-left-color: #44ff44; }
         .player-card.dead { border-left-color: #ff4444; opacity: 0.4; }
         .player-row { display: flex; justify-content: space-between; align-items: center; }
-        .player-name { font-weight: bold; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .player-name { font-weight: bold; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         .player-money { color: #2ecc71; font-weight: bold; font-family: monospace; }
-        .hp-bar-bg { width: 100%; background: #222; height: 6px; border-radius: 3px; overflow: hidden; }
-        .hp-bar-fill { height: 100%; background: #2ecc71; transition: width 0.1s; }
-        .center-panel { width: 44%; display: flex; justify-content: center; align-items: center; position: relative; background: #0d1017; }
-        canvas { background: #12161f; border-radius: 50%; border: 4px solid #242b35; box-shadow: 0 0 30px rgba(0,0,0,0.7); }
-        .info-label { position: absolute; top: 20px; font-size: 14px; font-weight: bold; color: #526273; letter-spacing: 1px; }
+        .hp-bar-bg { width: 100%; background: #222; height: 5px; border-radius: 2px; margin-top: 5px; overflow: hidden; }
+        .hp-bar-fill { height: 100%; transition: width 0.1s; }
+        .center-panel { width: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #0d1017; position: relative; }
+        #radar-container { position: relative; width: 600px; height: 600px; box-shadow: 0 0 30px rgba(0,0,0,0.8); border: 3px solid #242b35; border-radius: 4px; overflow: hidden; }
+        canvas { position: absolute; top: 0; left: 0; z-index: 2; }
+        #map-bg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; transition: background 0.5s; background-size: cover; }
+        .info-label { margin-bottom: 15px; font-size: 14px; font-weight: bold; color: #526273; letter-spacing: 1px; }
     </style>
 </head>
 <body>
     <div class="panel team-panel">
-        <div class="team-title team-my">MÜTTEFİKLER (MY TEAM)</div>
+        <div class="team-title team-my">MÜTTEFİKLER</div>
         <div id="myTeamList"></div>
     </div>
     <div class="panel center-panel">
-        <div class="info-label">TACTICAL REALTIME RADAR</div>
-        <canvas id="radar" width="520" height="520"></canvas>
+        <div class="info-label" id="current-map-label">MAP: DE_MIRAGE</div>
+        <div id="radar-container">
+            <div id="map-bg"></div>
+            <canvas id="radar" width="600" height="600"></canvas>
+        </div>
     </div>
     <div class="panel team-panel" style="border-right: none;">
-        <div class="team-title team-enemy">RAKİPLER (ENEMIES)</div>
+        <div class="team-title team-enemy">RAKİPLER</div>
         <div id="enemyTeamList"></div>
     </div>
+
     <script>
         const canvas = document.getElementById('radar');
         const ctx = canvas.getContext('2d');
-        const center = canvas.width / 2;
-        const SCALE = 0.15; 
+        const mapBg = document.getElementById('map-bg');
+        const mapLabel = document.getElementById('current-map-label');
         
+        let loadedMapName = "";
         let currentYaw = 0;
 
-        function drawRadarGrid() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.strokeStyle = '#1f2533';
-            ctx.lineWidth = 1;
-            for(let r = 80; r <= center; r += 80) {
-                ctx.beginPath(); ctx.arc(center, center, r, 0, 2 * Math.PI); ctx.stroke();
-            }
+        // Resmi CS2 Harita Metadata Kalibrasyon Veritabanı
+        const MAP_METADATA = {
+            "de_dust2":   { pos_x: -2476, pos_y: 3239,  scale: 4.4 },
+            "de_mirage":  { pos_x: -3230, pos_y: 1713,  scale: 5.0 },
+            "de_inferno": { pos_x: -2087, pos_y: 3870,  scale: 4.9 },
+            "de_nuke":    { pos_x: -3450, pos_y: -485,  scale: 7.0 }
+        };
+
+        function calculatePixelCoords(worldX, worldY, mapName) {
+            const meta = MAP_METADATA[mapName] || MAP_METADATA["de_mirage"];
+            // CS2 Dünya Koordinatlarını Harita Görsel Piksel Düzlemine İndirgeme Formülü
+            let pixelX = (worldX - meta.pos_x) / meta.scale;
+            let pixelY = (meta.pos_y - worldY) / meta.scale;
+            
+            // 1024x1024 standart haritayı web üzerindeki 600x600 canvas boyutuna adapte etme
+            let finalX = (pixelX / 1024) * canvas.width;
+            let finalY = (pixelY / 1024) * canvas.height;
+            return { x: finalX, y: finalY };
+        }
+
+        function drawPlayer(x, y, yaw, isLocal, isTeammate, name) {
+            const color = isLocal ? '#00ffcc' : (isTeammate ? '#3498db' : '#e74c3c');
+            
+            // Bakış Doğrultusu Oku
+            let lookRad = ((yaw - 90) * Math.PI) / 180;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 3;
+            ctx.lineCap = "round";
             ctx.beginPath();
-            ctx.moveTo(center, 0); ctx.lineTo(center, canvas.height);
-            ctx.moveTo(0, center); ctx.lineTo(canvas.width, center);
+            ctx.moveTo(x, y);
+            ctx.lineTo(x + Math.cos(lookRad) * 15, y + Math.sin(lookRad) * 15);
             ctx.stroke();
 
-            // Kendi Görüş Açımız (Gecikmesiz, Doğrudan İleriye Sabitlenmiş Görüş Konisi)
-            ctx.fillStyle = '#00ffcc';
+            // Oyuncu Çemberi
+            ctx.fillStyle = color;
             ctx.beginPath();
-            ctx.moveTo(center, center - 14);
-            ctx.lineTo(center - 8, center + 6);
-            ctx.lineTo(center + 8, center + 6);
-            ctx.closePath(); ctx.fill();
-
-            // Görüş Alanı Sınır Çizgileri (Fov Görselleştirmesi)
-            ctx.strokeStyle = 'rgba(0, 255, 204, 0.15)';
+            ctx.arc(x, y, 7, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.strokeStyle = '#ffffff';
             ctx.lineWidth = 1.5;
-            ctx.beginPath();
-            ctx.moveTo(center, center); ctx.lineTo(center - 40, 0);
-            ctx.moveTo(center, center); ctx.lineTo(center + 40, 0);
             ctx.stroke();
+
+            // İsim Etiketi
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 10px Segoe UI';
+            ctx.textAlign = 'center';
+            ctx.fillText(name, x, y - 12);
         }
 
         function createPlayerCard(player) {
             const statusClass = player.health > 0 ? 'alive' : 'dead';
-            const hpWidth = Math.max(0, Math.min(100, player.health));
-            let hpColor = '#2ecc71';
-            if(player.health < 35) hpColor = '#e74c3c';
-            else if(player.health < 70) hpColor = '#f1c40f';
-
+            const hpColor = player.health < 35 ? '#e74c3c' : (player.health < 70 ? '#f1c40f' : '#2ecc71');
             return `
                 <div class="player-card \${statusClass}">
                     <div class="player-row">
                         <span class="player-name">\${player.name}</span>
                         <span class="player-money">$\${player.money}</span>
                     </div>
-                    <div class="player-row" style="font-size: 11px; color: #a0aab5;">
-                        <span>HP: \${player.health}</span>
-                    </div>
                     <div class="hp-bar-bg">
-                        <div class="hp-bar-fill" style="width: \${hpWidth}%; background-color: \max_len${hpColor};"></div>
+                        <div class="hp-bar-fill" style="width: \${Math.max(0, player.health)}%; background-color: \${hpColor};"></div>
                     </div>
                 </div>
             `;
         }
 
-        async function updateDashboard() {
+        async function tick() {
             try {
                 const response = await fetch('/data');
                 const data = await response.json();
                 
-                drawRadarGrid();
+                // Harita Değişiklik Kontrolü ve Dinamik Arka Plan Ataması
+                let mapName = data.map_name || "de_mirage";
+                if (!MAP_METADATA[mapName]) mapName = "de_mirage"; // Bilinmeyen map koruması
                 
-                // Oyun motoru açısını oku
-                const targetYaw = data.yaw || 0;
-                
-                // Dönüş Titremelerini Engelleme (Interpolation Düzeltmesi)
-                // Ani 180 derece dönüşlerde veya sınır geçişlerinde (-180 / +180) yaşanan sapmayı önler
-                let diff = targetYaw - currentYaw;
-                while (diff < -180) diff += 360;
-                while (diff > 180) diff -= 360;
-                currentYaw += diff * 0.45; // 0.45 Sönümleme Katsayısı (Akıcı ve Hızlı)
+                if (loadedMapName !== mapName) {
+                    loadedMapName = mapName;
+                    mapBg.style.backgroundImage = `url('/\${mapName}.png')`;
+                    mapLabel.innerText = "MAP: " + mapName.toUpperCase();
+                }
 
-                // CS2 Koordinat Sistemi Doğrusal Açı Ofseti (-90 derece harita oryantasyonu için)
-                const viewYawRad = ((currentYaw - 90) * Math.PI) / 180;
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
 
                 let myTeamHTML = "";
                 let enemyTeamHTML = "";
 
+                // Lokal oyuncunun dünya koordinatlarını bul (Merkezleme ve Göreli Hizalama İyileştirmesi)
+                let localPlayer = data.players.find(p => p.is_local);
+                
                 data.players.forEach(p => {
-                    if (p.team === data.local_team) {
-                        myTeamHTML += createPlayerCard(p);
-                    } else {
-                        enemyTeamHTML += createPlayerCard(p);
-                    }
+                    if (p.team === data.local_team) myTeamHTML += createPlayerCard(p);
+                    else enemyTeamHTML += createPlayerCard(p);
 
-                    if (p.health > 0 && !p.is_local) {
-                        // CS2 Dünya Matris Rotasyonu (Düşman koordinatlarını kendi etrafında eksiksiz çevirme)
-                        // CS2 X ekseni Sağa/Sola, Y ekseni Yukarı/Aşağı doğrusal verisidir
-                        let rx = p.dx * Math.cos(viewYawRad) + p.dy * Math.sin(viewYawRad);
-                        let ry = -p.dx * Math.sin(viewYawRad) + p.dy * Math.cos(viewYawRad);
-
-                        let screenX = center + (rx * SCALE);
-                        let screenY = center + (ry * SCALE);
-
-                        let dist = Math.sqrt(Math.pow(screenX - center, 2) + Math.pow(screenY - center, 2));
-                        if (dist < center - 15) {
-                            const playerColor = p.team === data.local_team ? '#00ffcc' : '#ff4444';
-
-                            // Geliştirilmiş Oyuncu Bakış Doğrultusu Hesaplaması
-                            // Oyuncunun dünya açısı ile kendi açımız arasındaki farkı radyal düzleme indirgiyoruz
-                            let lookAngleRad = ((p.yaw - currentYaw - 90) * Math.PI) / 180;
-                            let arrowLength = 14;
-
-                            // Dinamik Bakış Yönü Oku (Dairesel Başlıklı Ok Tasarımı)
-                            ctx.strokeStyle = playerColor;
-                            ctx.lineWidth = 2.5;
-                            ctx.lineCap = "round";
-                            ctx.beginPath();
-                            ctx.moveTo(screenX, screenY);
-                            ctx.lineTo(
-                                screenX + Math.cos(lookAngleRad) * arrowLength,
-                                screenY + Math.sin(lookAngleRad) * arrowLength
-                            );
-                            ctx.stroke();
-
-                            // Oyuncu Merkez Noktası
-                            ctx.fillStyle = playerColor;
-                            ctx.beginPath(); 
-                            ctx.arc(screenX, screenY, 6.5, 0, 2 * Math.PI); 
-                            ctx.fill();
-                            
-                            // Kontur (Belirginlik Çizgisi)
-                            ctx.strokeStyle = '#ffffff'; 
-                            ctx.lineWidth = 1.2; 
-                            ctx.stroke();
-                        }
+                    if (p.health > 0) {
+                        // Dünya koordinatlarından tam piksel tespiti
+                        // mapName parametresi otomatik gönderilerek ölçek eşleşmesi anlık sağlanır
+                        let coords = calculatePixelCoords(p.world_x, p.world_y, mapName);
+                        drawPlayer(coords.x, coords.y, p.yaw, p.is_local, p.team === data.local_team, p.name);
                     }
                 });
 
                 document.getElementById('myTeamList').innerHTML = myTeamHTML;
                 document.getElementById('enemyTeamList').innerHTML = enemyTeamHTML;
 
-            } catch (e) { }
-            setTimeout(updateDashboard, 15); // Güncelleme hızını 15ms'ye düşürerek tepki süresini artırdık
+            } catch (e) {}
+            setTimeout(tick, 15);
         }
-        updateDashboard();
+        tick();
     </script>
 </body>
 </html>
@@ -399,16 +339,13 @@ def main():
             time.sleep(1)
 
     handle = indirect_open_process(pid)
-    if not handle:
-        print("\n[-] Süreç baglantisi (Handle) alinmadi.")
-        return
-        
+    if not handle: return
     base = get_module_base(pid, "client.dll")
 
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    print("[+] Taktiksel Veri Hafıza Motoru Çalışıyor... (Kusursuz Açı Senkronizasyonu)")
+    print("[+] Taktiksel Harita Senkronizasyonu Aktif. Tarayıcıdan http://localhost:8000 adresine giriniz.")
 
     while True:
         try:
@@ -421,9 +358,22 @@ def main():
                 continue
                 
             localPlayer = Entity(handle, 0, localPlayerPawnAddr)
-            local_pos = localPlayer.position
             local_team = localPlayer.team
             view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
+
+            # --- OTOMATİK HARİTA ADI BULUCU MOTORU ---
+            map_name = "de_mirage"
+            try:
+                # Hafızadaki aktif oyun dll eşleşmesi üzerinden harita ismi dizgisi aranır
+                game_lib = get_module_base(pid, "matchmaking.dll")
+                if game_lib:
+                    map_ptr = read_memory(handle, game_lib + Offsets.dwMatchmakingGameDLL, ctypes.c_uint64)
+                    if map_ptr:
+                        raw_map = read_string(handle, map_ptr, 64)
+                        if "de_" in raw_map:
+                            map_name = raw_map.strip()
+            except:
+                map_name = "de_mirage"
 
             temp_players = []
 
@@ -441,10 +391,8 @@ def main():
 
                 player = Entity(handle, entity, entityPawn)
                 player_pos = player.position
-
-                is_local = (entityPawn == localPlayerPawnAddr)
-                
                 player_yaw = read_memory(handle, entityPawn + Offsets.m_angEyeAngles, ctypes.c_float)
+                is_local = (entityPawn == localPlayerPawnAddr)
 
                 temp_players.append({
                     "name": player.name,
@@ -453,26 +401,23 @@ def main():
                     "team": player.team,
                     "is_local": is_local,
                     "yaw": player_yaw,
-                    "dx": player_pos["x"] - local_pos["x"],
-                    "dy": player_pos["y"] - local_pos["y"]
+                    "world_x": player_pos["x"],
+                    "world_y": player_pos["y"]
                 })
 
             radar_data = {
+                "map_name": map_name,
                 "yaw": view_angles_y,
                 "local_team": local_team,
                 "players": temp_players
             }
             
-            time.sleep(0.01) # Hafıza döngüsünü 10ms hıza çekerek gecikmeyi tamamen sıfırladık
+            time.sleep(0.01)
                 
         except Exception:
             time.sleep(0.1)
             continue
 
 if __name__ == "__main__":
-    main() 
-             
-                
-                
-                
-                                 
+    main()
+    
