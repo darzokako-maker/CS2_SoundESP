@@ -26,7 +26,7 @@ jobs:
 
     - name: Web Radar Kodunu Tek Parca EXE Olarak Derle
       run: |
-        pyinstaller --onefile --clean --name="CS2_Web_Radar" main.py
+        pyinstaller --noconsole  --onefile --clean --name="CS2_Web_Radar" main.py
 
     - name: Uretilen Web Radar EXE Dosyasini Paylas
       uses: actions/upload-artifact@v4
