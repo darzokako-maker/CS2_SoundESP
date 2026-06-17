@@ -12,6 +12,18 @@ import os
 # --- Windows Hafıza Okuma API Yapılandırması ---
 kernel32 = ctypes.windll.kernel32
 
+kernel32.VirtualAlloc.restype = ctypes.c_void_p
+kernel32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
+
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+
+kernel32.GetProcAddress.restype = ctypes.c_void_p
+kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
+
+kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+
 class CLIENT_ID(ctypes.Structure):
     _fields_ = [("UniqueProcess", wintypes.HANDLE), ("UniqueThread", wintypes.HANDLE)]
 
@@ -117,13 +129,19 @@ def read_vec3(handle, address):
         return {"x": buffer.x, "y": buffer.y, "z": buffer.z}
     return {"x": 0, "y": 0, "z": 0}
 
-# --- CS2 2026 Ofsetleri ---
+def get_asset_path(relative_path):
+    """ PyInstaller gömülü (.exe içi) dosyalarına erişimi sağlayan köprü """
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
+
+# --- CS2 Ofsetleri ---
 class Offsets:
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
     dwCSGOInput = 0x2356240        
     dwGlobalVars = 0x17CD0F0       
-    dwMatchmakingGameDLL = 0x33A380 # Harita ismini yakalamak için engine modülü bağıntısı
+    dwMatchmakingGameDLL = 0x33A380
     m_iTeamNum = 0x3EB             
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
@@ -132,6 +150,33 @@ class Offsets:
     m_pInGameMoneyServices = 0x6F8 
     m_iAccount = 0x40              
     m_angEyeAngles = 0x139C        
+
+class Entity:
+    def __init__(self, handle, controller, pawn):
+        self.handle = handle
+        self.controller = controller
+        self.pawn = pawn
+    
+    @property
+    def team(self): return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
+    @property
+    def health(self): return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
+    @property
+    def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
+    
+    @property
+    def name(self):
+        if not self.controller: return "LocalPlayer"
+        name_ptr = read_memory(self.handle, self.controller + Offsets.m_iszPlayerName, ctypes.c_uint64)
+        if name_ptr: return read_string(self.handle, name_ptr, 32)
+        return "Player"
+        
+    @property
+    def money(self):
+        if not self.controller: return 0
+        money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
+        if not money_services: return 0
+        return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
 radar_data = {"map_name": "de_mirage", "yaw": 0, "local_team": 0, "players": []}
 
@@ -146,11 +191,12 @@ class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps(radar_data).encode('utf-8'))
         elif self.path in ['/de_dust2.png', '/de_mirage.png', '/de_inferno.png', '/de_nuke.png']:
             filename = self.path[1:]
-            if os.path.exists(filename):
+            full_path = get_asset_path(filename)
+            if os.path.exists(full_path):
                 self.send_response(200)
                 self.send_header('Content-Type', 'image/png')
                 self.end_headers()
-                with open(filename, 'rb') as f:
+                with open(full_path, 'rb') as f:
                     self.wfile.write(f.read())
             else:
                 self.send_error(404)
@@ -161,6 +207,12 @@ class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(HTML_RADAR_UI.encode('utf-8'))
         else:
             self.send_error(404)
+
+def run_web_server():
+    PORT = 8000
+    with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
+        print(f"[+] Multi-Panel Web Arayuzu Baslatildi: http://localhost:{PORT}")
+        httpd.serve_forever()
 
 # --- WEB UI & KUSURSUZ COORD-MAP HARMANLAMA MOTORU ---
 HTML_RADAR_UI = """
@@ -214,9 +266,8 @@ HTML_RADAR_UI = """
         const mapLabel = document.getElementById('current-map-label');
         
         let loadedMapName = "";
-        let currentYaw = 0;
 
-        // Resmi CS2 Harita Metadata Kalibrasyon Veritabanı
+        // Resmi CS2 Harita Metadata Veritabanı (Görsellerle Birebir Kalibre)
         const MAP_METADATA = {
             "de_dust2":   { pos_x: -2476, pos_y: 3239,  scale: 4.4 },
             "de_mirage":  { pos_x: -3230, pos_y: 1713,  scale: 5.0 },
@@ -226,11 +277,9 @@ HTML_RADAR_UI = """
 
         function calculatePixelCoords(worldX, worldY, mapName) {
             const meta = MAP_METADATA[mapName] || MAP_METADATA["de_mirage"];
-            // CS2 Dünya Koordinatlarını Harita Görsel Piksel Düzlemine İndirgeme Formülü
             let pixelX = (worldX - meta.pos_x) / meta.scale;
             let pixelY = (meta.pos_y - worldY) / meta.scale;
             
-            // 1024x1024 standart haritayı web üzerindeki 600x600 canvas boyutuna adapte etme
             let finalX = (pixelX / 1024) * canvas.width;
             let finalY = (pixelY / 1024) * canvas.height;
             return { x: finalX, y: finalY };
@@ -239,17 +288,17 @@ HTML_RADAR_UI = """
         function drawPlayer(x, y, yaw, isLocal, isTeammate, name) {
             const color = isLocal ? '#00ffcc' : (isTeammate ? '#3498db' : '#e74c3c');
             
-            // Bakış Doğrultusu Oku
+            // Bakış Doğrultusu Çizgisi
             let lookRad = ((yaw - 90) * Math.PI) / 180;
             ctx.strokeStyle = color;
             ctx.lineWidth = 3;
             ctx.lineCap = "round";
             ctx.beginPath();
             ctx.moveTo(x, y);
-            ctx.lineTo(x + Math.cos(lookRad) * 15, y + Math.sin(lookRad) * 15);
+            ctx.lineTo(x + Math.cos(lookRad) * 14, y + Math.sin(lookRad) * 14);
             ctx.stroke();
 
-            // Oyuncu Çemberi
+            // Oyuncu Noktası
             ctx.fillStyle = color;
             ctx.beginPath();
             ctx.arc(x, y, 7, 0, 2 * Math.PI);
@@ -269,13 +318,13 @@ HTML_RADAR_UI = """
             const statusClass = player.health > 0 ? 'alive' : 'dead';
             const hpColor = player.health < 35 ? '#e74c3c' : (player.health < 70 ? '#f1c40f' : '#2ecc71');
             return `
-                <div class="player-card \${statusClass}">
+                <div class="player-card ${statusClass}">
                     <div class="player-row">
-                        <span class="player-name">\${player.name}</span>
-                        <span class="player-money">$\${player.money}</span>
+                        <span class="player-name">${player.name}</span>
+                        <span class="player-money">$${player.money}</span>
                     </div>
                     <div class="hp-bar-bg">
-                        <div class="hp-bar-fill" style="width: \${Math.max(0, player.health)}%; background-color: \${hpColor};"></div>
+                        <div class="hp-bar-fill" style="width: ${Math.max(0, player.health)}%; background-color: ${hpColor};"></div>
                     </div>
                 </div>
             `;
@@ -286,13 +335,12 @@ HTML_RADAR_UI = """
                 const response = await fetch('/data');
                 const data = await response.json();
                 
-                // Harita Değişiklik Kontrolü ve Dinamik Arka Plan Ataması
                 let mapName = data.map_name || "de_mirage";
-                if (!MAP_METADATA[mapName]) mapName = "de_mirage"; // Bilinmeyen map koruması
+                if (!MAP_METADATA[mapName]) mapName = "de_mirage";
                 
                 if (loadedMapName !== mapName) {
                     loadedMapName = mapName;
-                    mapBg.style.backgroundImage = `url('/\${mapName}.png')`;
+                    mapBg.style.backgroundImage = "url('/" + mapName + ".png')";
                     mapLabel.innerText = "MAP: " + mapName.toUpperCase();
                 }
 
@@ -300,17 +348,12 @@ HTML_RADAR_UI = """
 
                 let myTeamHTML = "";
                 let enemyTeamHTML = "";
-
-                // Lokal oyuncunun dünya koordinatlarını bul (Merkezleme ve Göreli Hizalama İyileştirmesi)
-                let localPlayer = data.players.find(p => p.is_local);
                 
                 data.players.forEach(p => {
                     if (p.team === data.local_team) myTeamHTML += createPlayerCard(p);
                     else enemyTeamHTML += createPlayerCard(p);
 
                     if (p.health > 0) {
-                        // Dünya koordinatlarından tam piksel tespiti
-                        // mapName parametresi otomatik gönderilerek ölçek eşleşmesi anlık sağlanır
                         let coords = calculatePixelCoords(p.world_x, p.world_y, mapName);
                         drawPlayer(coords.x, coords.y, p.yaw, p.is_local, p.team === data.local_team, p.name);
                     }
@@ -364,7 +407,6 @@ def main():
             # --- OTOMATİK HARİTA ADI BULUCU MOTORU ---
             map_name = "de_mirage"
             try:
-                # Hafızadaki aktif oyun dll eşleşmesi üzerinden harita ismi dizgisi aranır
                 game_lib = get_module_base(pid, "matchmaking.dll")
                 if game_lib:
                     map_ptr = read_memory(handle, game_lib + Offsets.dwMatchmakingGameDLL, ctypes.c_uint64)
@@ -420,4 +462,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
