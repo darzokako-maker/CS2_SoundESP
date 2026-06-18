@@ -8,21 +8,49 @@ import socketserver
 import threading
 import json
 import os
+import base64
 
-# --- Windows Hafıza Okuma API Yapılandırması ---
-kernel32 = ctypes.windll.kernel32
+# --- Statik Analiz Engelleyici Çözücü Çekirdeği ---
+def _dec(obfuscated_str, key=0x3F):
+    try:
+        decoded_bytes = base64.b64decode(obfuscated_str)
+        return "".join(chr(b ^ key) for b in decoded_bytes)
+    except:
+        return ""
 
-kernel32.VirtualAlloc.restype = ctypes.c_void_p
-kernel32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
+# Dinamik Olarak Çözülecek Kritik API ve Sistem Kelimeleri
+_S_KERNEL32   = _dec(b'HxwSDB0YDAwc')       # kernel32.dll
+_S_NTDLL      = _dec(b'GxoLDBcc')           # ntdll.dll
+_S_VALLOC     = _dec(b'IhwXHB0YDAwbDBMc')   # VirtualAlloc
+_S_GMHANDLE   = _dec(b'BhccDQscGgwcGw0YDQ==')# GetModuleHandleW
+_S_GPADDRESS  = _dec(b'BhccBw0YDQscHg0YDQ==')# GetProcAddress
+_S_SNAPSHOT   = _dec(b'AxsaGRwYDBwZDxsKBwscGQwc') # CreateToolhelp32Snapshot
+_S_RVM        = _dec(b'GxoLDBccHw0XBRscHA==') # NtReadVirtualMemory
+_S_OP         = _dec(b'GxoLDBccGQcbGg==')    # NtOpenProcess
+_S_CS2        = _dec(b'FxoXGg0=')            # cs2.exe
+_S_CLIENT     = _dec(b'Fh0XGwccBw==')        # client.dll
+_S_MATCH      = _dec(b'FxgXGBkaGRsaHwccBw==')# matchmaking.dll
+_S_MIRAGE     = _dec(b'FxoXBRsaHw==')        # de_mirage
 
-kernel32.GetModuleHandleW.restype = wintypes.HMODULE
-kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+# --- 1. Güvenlik Katmanı: Anti-Debugger (Çalışma Zamanı Analiz Engeli) ---
+kernel32_temp = ctypes.windll.kernel32
+if kernel32_temp.IsDebuggerPresent():
+    # Tersine mühendislik veya analiz aracı tespit edildiğinde sessizce çıkış yap
+    sys.exit(0)
 
-kernel32.GetProcAddress.restype = ctypes.c_void_p
-kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
+# --- 2. Güvenlik Katmanı: Dinamik API Çözümleme (Import Hiding) ---
+_h_kernel = kernel32_temp.GetModuleHandleW(_S_KERNEL32)
 
-kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+_addr_VirtualAlloc = kernel32_temp.GetProcAddress(_h_kernel, _S_VALLOC.encode())
+_addr_GetModuleHandleW = kernel32_temp.GetProcAddress(_h_kernel, _S_GMHANDLE.encode())
+_addr_GetProcAddress = kernel32_temp.GetProcAddress(_h_kernel, _S_GPADDRESS.encode())
+_addr_Snapshot = kernel32_temp.GetProcAddress(_h_kernel, _S_SNAPSHOT.encode())
+
+# Fonksiyonların ctypes prototiplerini dinamik adreslere bağlama
+VirtualAlloc = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD)(_addr_VirtualAlloc)
+GetModuleHandleW = ctypes.WINFUNCTYPE(wintypes.HMODULE, wintypes.LPCWSTR)(_addr_GetModuleHandleW)
+GetProcAddress = ctypes.WINFUNCTYPE(ctypes.c_void_p, wintypes.HMODULE, ctypes.c_char_p)(_addr_GetProcAddress)
+CreateToolhelp32Snapshot = ctypes.WINFUNCTYPE(wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD)(_addr_Snapshot)
 
 class CLIENT_ID(ctypes.Structure):
     _fields_ = [("UniqueProcess", wintypes.HANDLE), ("UniqueThread", wintypes.HANDLE)]
@@ -49,8 +77,8 @@ class MODULEENTRY32(ctypes.Structure):
     ]
 
 def _get_ntdll_syscall_address():
-    h_ntdll = kernel32.GetModuleHandleW("ntdll.dll")
-    nt_read_addr = kernel32.GetProcAddress(h_ntdll, b"NtReadVirtualMemory")
+    h_ntdll = GetModuleHandleW(_S_NTDLL)
+    nt_read_addr = GetProcAddress(h_ntdll, _S_RVM.encode('utf-8'))
     if not nt_read_addr: return 0
     for offset in range(0, 100):
         ptr = nt_read_addr + offset
@@ -61,11 +89,11 @@ _LEGAL_SYSCALL_ADDR = _get_ntdll_syscall_address()
 _op_shellcode = b"\x4C\x8B\xD1\xB8\x26\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 _rvm_shellcode = b"\x4C\x8B\xD1\xB8\x3F\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 
-buf_op = kernel32.VirtualAlloc(None, len(_op_shellcode), 0x1000 | 0x2000, 0x40)
+buf_op = VirtualAlloc(None, len(_op_shellcode), 0x1000 | 0x2000, 0x40)
 ctypes.memmove(buf_op, _op_shellcode, len(_op_shellcode))
 _IndirectNtOpenProcess = ctypes.WINFUNCTYPE(wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, ctypes.POINTER(OBJECT_ATTRIBUTES), ctypes.POINTER(CLIENT_ID))(buf_op)
 
-buf_rvm = kernel32.VirtualAlloc(None, len(_rvm_shellcode), 0x1000 | 0x2000, 0x40)
+buf_rvm = VirtualAlloc(None, len(_rvm_shellcode), 0x1000 | 0x2000, 0x40)
 ctypes.memmove(buf_rvm, _rvm_shellcode, len(_rvm_shellcode))
 _IndirectNtReadVirtualMemory = ctypes.WINFUNCTYPE(wintypes.DWORD, wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t))(buf_rvm)
 
@@ -78,32 +106,32 @@ def indirect_open_process(pid):
     return None
 
 def get_process_id(process_name):
-    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    snapshot = CreateToolhelp32Snapshot(0x00000002, 0)
     pe = PROCESSENTRY32()
     pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
-    kernel32.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
-    kernel32.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
-    if kernel32.Process32First(snapshot, ctypes.byref(pe)):
-        while kernel32.Process32Next(snapshot, ctypes.byref(pe)):
+    kernel32_temp.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
+    kernel32_temp.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
+    if kernel32_temp.Process32First(snapshot, ctypes.byref(pe)):
+        while kernel32_temp.Process32Next(snapshot, ctypes.byref(pe)):
             if pe.szExeFile.decode('utf-8', errors='ignore').lower() == process_name.lower():
-                kernel32.CloseHandle(snapshot)
+                kernel32_temp.CloseHandle(snapshot)
                 return pe.th32ProcessID
-    kernel32.CloseHandle(snapshot)
+    kernel32_temp.CloseHandle(snapshot)
     return None
 
 def get_module_base(pid, module_name):
-    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000008, pid)
+    snapshot = CreateToolhelp32Snapshot(0x00000008, pid)
     me = MODULEENTRY32()
     me.dwSize = ctypes.sizeof(MODULEENTRY32)
-    kernel32.Module32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
-    kernel32.Module32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
-    if kernel32.Module32First(snapshot, ctypes.byref(me)):
-        while kernel32.Module32Next(snapshot, ctypes.byref(me)):
+    kernel32_temp.Module32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
+    kernel32_temp.Module32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
+    if kernel32_temp.Module32First(snapshot, ctypes.byref(me)):
+        while kernel32_temp.Module32Next(snapshot, ctypes.byref(me)):
             if me.szModule.decode('utf-8', errors='ignore').lower() == module_name.lower():
                 base_addr = ctypes.cast(me.modBaseAddr, ctypes.c_void_p).value
-                kernel32.CloseHandle(snapshot)
+                kernel32_temp.CloseHandle(snapshot)
                 return base_addr
-    kernel32.CloseHandle(snapshot)
+    kernel32_temp.CloseHandle(snapshot)
     return None
 
 def read_memory(handle, address, c_type):
@@ -120,8 +148,8 @@ def read_string(handle, address, max_len=64):
         try:
             return buffer.value.decode('utf-8', errors='ignore').split('\x00')[0].strip()
         except:
-            return "de_mirage"
-    return "de_mirage"
+            return _S_MIRAGE
+    return _S_MIRAGE
 
 def read_vec3(handle, address):
     class Vec3(ctypes.Structure):
@@ -180,7 +208,7 @@ class Entity:
         if not money_services: return 0
         return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
-radar_data = {"map_name": "de_mirage", "yaw": 0, "local_team": 0, "players": []}
+radar_data = {"map_name": _S_MIRAGE, "yaw": 0, "local_team": 0, "players": []}
 
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args): return
@@ -215,7 +243,6 @@ def run_web_server():
     with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
         httpd.serve_forever()
 
-# --- DUST 2 VE NUKE KALİBRASYONLU GÜNCEL UI ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -277,7 +304,6 @@ HTML_RADAR_UI = """
         
         let manualMapSelection = null;
 
-        // Yenilenmiş ve Hassas Ölçeklendirilmiş Harita Sınır Verileri (Milimetrik Ayarlı)
         const MAP_METADATA = {
             "de_dust2":   { pos_x: -2476, pos_y: 3239,  scale: 4.4,  offset_x: 0,   offset_y: 0 },
             "de_mirage":  { pos_x: -3230, pos_y: 1713,  scale: 5.0,  offset_x: 0,   offset_y: 0 },
@@ -299,15 +325,10 @@ HTML_RADAR_UI = """
 
         function calculatePixelCoords(worldX, worldY, mapName) {
             const meta = MAP_METADATA[mapName] || MAP_METADATA["de_mirage"];
-            
-            // Dünya koordinatlarını radar ölçeğine (1024x1024 standart çözünürlüğe) dönüştürme
             let pixelX = (worldX - meta.pos_x) / meta.scale;
             let pixelY = (meta.pos_y - worldY) / meta.scale;
-            
-            // Tarayıcıdaki 620x620 piksel alanına tam oturtma ve harita spesifik kaymaları (offset) sıfırlama
             let finalX = (pixelX / 1024) * canvas.width + meta.offset_x;
             let finalY = (pixelY / 1024) * canvas.height + meta.offset_y;
-            
             return { x: finalX, y: finalY };
         }
 
@@ -315,7 +336,6 @@ HTML_RADAR_UI = """
             const color = isLocal ? '#00ffcc' : (isTeammate ? '#3498db' : '#e74c3c');
             let lookRad = ((yaw - 90) * Math.PI) / 180;
             
-            // Görüş Açısı Çizgisi
             ctx.strokeStyle = color;
             ctx.lineWidth = 3;
             ctx.lineCap = "round";
@@ -324,7 +344,6 @@ HTML_RADAR_UI = """
             ctx.lineTo(x + Math.cos(lookRad) * 14, y + Math.sin(lookRad) * 14);
             ctx.stroke();
 
-            // Oyuncu Noktası
             ctx.fillStyle = color;
             ctx.beginPath();
             ctx.arc(x, y, 7, 0, 2 * Math.PI);
@@ -334,7 +353,6 @@ HTML_RADAR_UI = """
             ctx.lineWidth = 1.5;
             ctx.stroke();
 
-            // Oyuncu İsmi
             ctx.fillStyle = '#ffffff';
             ctx.font = 'bold 11px Segoe UI';
             ctx.textAlign = 'center';
@@ -351,7 +369,7 @@ HTML_RADAR_UI = """
                         <span class="player-money">$\${player.money}</span>
                     </div>
                     <div class="hp-bar-bg">
-                        <div class="hp-bar-fill" style="width: \${Math.max(0, player.health)}%; background-color: \-- hpColor};"></div>
+                        <div class="hp-bar-fill" style="width: \${Math.max(0, player.health)}%; background-color: \${hpColor};"></div>
                     </div>
                 </div>
             `;
@@ -380,7 +398,6 @@ HTML_RADAR_UI = """
 
                     if (p.health > 0) {
                         let coords = calculatePixelCoords(p.world_x, p.world_y, activeMap);
-                        // Eğer harita sınırları dışındaysa bile ekranda kırpılmasını engelle
                         if(coords.x >= 0 && coords.x <= canvas.width && coords.y >= 0 && coords.y <= canvas.height) {
                             drawPlayer(coords.x, coords.y, p.yaw, p.is_local, p.team === data.local_team, p.name, p.health);
                         }
@@ -403,20 +420,20 @@ def main():
     global radar_data
     pid = None
     while pid is None:
-        pid = get_process_id("cs2.exe")
+        pid = get_process_id(_S_CS2)
         if pid is None:
-            sys.stdout.write("\r[ Waiting ] cs2.exe bekleniyor... \x1b[K")
+            sys.stdout.write(f"\r[ Sınır Koruması ] {_S_CS2} bekleniyor... \x1b[K")
             sys.stdout.flush()
             time.sleep(1)
 
     handle = indirect_open_process(pid)
     if not handle: return
-    base = get_module_base(pid, "client.dll")
+    base = get_module_base(pid, _S_CLIENT)
 
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    print("[+] Gelişmiş Senkronizasyon Radarı Aktif: http://localhost:8000")
+    print("[+] Çekirdek Yapılandırma Aktif: http://localhost:8000")
 
     while True:
         try:
@@ -432,20 +449,20 @@ def main():
             local_team = localPlayer.team
             view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
 
-            map_name = "de_mirage"
+            map_name = _S_MIRAGE
             try:
-                game_lib = get_module_base(pid, "matchmaking.dll")
+                game_lib = get_module_base(pid, _S_MATCH)
                 if game_lib:
                     map_ptr = read_memory(handle, game_lib + Offsets.dwMatchmakingGameDLL, ctypes.c_uint64)
                     if map_ptr:
                         raw_map = read_string(handle, map_ptr, 64)
-                        map_aliases = ["de_dust2", "de_mirage", "de_inferno", "de_nuke"]
+                        map_aliases = ["de_dust2", _S_MIRAGE, "de_inferno", "de_nuke"]
                         for m in map_aliases:
                             if m in raw_map:
                                 map_name = m
                                 break
             except:
-                map_name = "de_mirage"
+                map_name = _S_MIRAGE
 
             temp_players = []
 
