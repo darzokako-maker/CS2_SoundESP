@@ -137,7 +137,7 @@ def get_asset_path(relative_path):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-# --- CS2 Ofsetleri ---
+# --- CS2 Ofset Yapısı ---
 class Offsets:
     dwEntityList = 0x24E76A0       
     dwLocalPlayerPawn = 0x2341698  
@@ -215,12 +215,12 @@ def run_web_server():
     with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
         httpd.serve_forever()
 
-# --- MANUEL HARİTA SEÇİM BUTONLU YENİ ARAYÜZ ---
+# --- DUST 2 VE NUKE KALİBRASYONLU GÜNCEL UI ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>CS2 Radar Engine</title>
+    <title>CS2 Radar Engine Pro</title>
     <style>
         body { margin: 0; background: #0b0e14; display: flex; color: #fff; font-family: 'Segoe UI', sans-serif; height: 100vh; overflow: hidden; }
         .panel { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; padding: 20px; background: #11141c; border-right: 2px solid #1c212e; }
@@ -236,17 +236,16 @@ HTML_RADAR_UI = """
         .player-money { color: #2ecc71; font-weight: bold; font-family: monospace; }
         .hp-bar-bg { width: 100%; background: #222; height: 5px; border-radius: 2px; margin-top: 5px; overflow: hidden; }
         .hp-bar-fill { height: 100%; transition: width 0.1s; }
-        .center-panel { width: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #0d1017; position: relative; }
         
-        /* Manuel Harita Seçim Buton Grubu */
-        .map-selector { display: flex; gap: 10px; margin-bottom: 15px; }
+        .center-panel { width: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #0d1017; position: relative; }
+        .map-selector { display: flex; gap: 10px; margin-bottom: 15px; z-index: 10; }
         .map-btn { background: #1c212e; color: #8a96a3; border: 2px solid #242b35; padding: 8px 16px; border-radius: 4px; font-weight: bold; cursor: pointer; transition: all 0.2s; }
         .map-btn:hover { background: #242b35; color: #fff; }
         .map-btn.active { background: #00ffcc; color: #0b0e14; border-color: #00ffcc; box-shadow: 0 0 10px rgba(0,255,204,0.4); }
 
-        #radar-container { position: relative; width: 600px; height: 600px; box-shadow: 0 0 30px rgba(0,0,0,0.8); border: 3px solid #242b35; border-radius: 4px; overflow: hidden; }
+        #radar-container { position: relative; width: 620px; height: 620px; box-shadow: 0 0 30px rgba(0,0,0,0.8); border: 3px solid #242b35; border-radius: 4px; overflow: hidden; background: #000; }
         canvas { position: absolute; top: 0; left: 0; z-index: 2; }
-        #map-bg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; background-size: cover; }
+        #map-bg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; background-size: 100% 100%; background-repeat: no-repeat; background-position: center; }
     </style>
 </head>
 <body>
@@ -263,7 +262,7 @@ HTML_RADAR_UI = """
         </div>
         <div id="radar-container">
             <div id="map-bg"></div>
-            <canvas id="radar" width="600" height="600"></canvas>
+            <canvas id="radar" width="620" height="620"></canvas>
         </div>
     </div>
     <div class="panel team-panel" style="border-right: none;">
@@ -276,16 +275,16 @@ HTML_RADAR_UI = """
         const ctx = canvas.getContext('2d');
         const mapBg = document.getElementById('map-bg');
         
-        let manualMapSelection = null; // Kullanıcının tıkladığı haritayı hafızada tutar
+        let manualMapSelection = null;
 
+        // Yenilenmiş ve Hassas Ölçeklendirilmiş Harita Sınır Verileri (Milimetrik Ayarlı)
         const MAP_METADATA = {
-            "de_dust2":   { pos_x: -2476, pos_y: 3239,  scale: 4.4 },
-            "de_mirage":  { pos_x: -3230, pos_y: 1713,  scale: 5.0 },
-            "de_inferno": { pos_x: -2087, pos_y: 3870,  scale: 4.9 },
-            "de_nuke":    { pos_x: -3450, pos_y: -485,  scale: 7.0 }
+            "de_dust2":   { pos_x: -2476, pos_y: 3239,  scale: 4.4,  offset_x: 0,   offset_y: 0 },
+            "de_mirage":  { pos_x: -3230, pos_y: 1713,  scale: 5.0,  offset_x: 0,   offset_y: 0 },
+            "de_inferno": { pos_x: -2087, pos_y: 3870,  scale: 4.9,  offset_x: 0,   offset_y: 0 },
+            "de_nuke":    { pos_x: -3450, pos_y: -485,  scale: 7.0,  offset_x: -10, offset_y: -5 }
         };
 
-        // Butona basıldığında haritayı kilitleyen fonksiyon
         function selectMap(mapName) {
             manualMapSelection = mapName;
             updateMapVisuals(mapName);
@@ -293,8 +292,6 @@ HTML_RADAR_UI = """
 
         function updateMapVisuals(mapName) {
             mapBg.style.backgroundImage = "url('/" + mapName + ".png')";
-            
-            // Aktif buton rengini güncelleme
             document.querySelectorAll('.map-btn').forEach(btn => btn.classList.remove('active'));
             const activeBtn = document.getElementById('btn-' + mapName);
             if (activeBtn) activeBtn.classList.add('active');
@@ -302,18 +299,23 @@ HTML_RADAR_UI = """
 
         function calculatePixelCoords(worldX, worldY, mapName) {
             const meta = MAP_METADATA[mapName] || MAP_METADATA["de_mirage"];
+            
+            // Dünya koordinatlarını radar ölçeğine (1024x1024 standart çözünürlüğe) dönüştürme
             let pixelX = (worldX - meta.pos_x) / meta.scale;
             let pixelY = (meta.pos_y - worldY) / meta.scale;
             
-            let finalX = (pixelX / 1024) * canvas.width;
-            let finalY = (pixelY / 1024) * canvas.height;
+            // Tarayıcıdaki 620x620 piksel alanına tam oturtma ve harita spesifik kaymaları (offset) sıfırlama
+            let finalX = (pixelX / 1024) * canvas.width + meta.offset_x;
+            let finalY = (pixelY / 1024) * canvas.height + meta.offset_y;
+            
             return { x: finalX, y: finalY };
         }
 
-        function drawPlayer(x, y, yaw, isLocal, isTeammate, name) {
+        function drawPlayer(x, y, yaw, isLocal, isTeammate, name, health) {
             const color = isLocal ? '#00ffcc' : (isTeammate ? '#3498db' : '#e74c3c');
             let lookRad = ((yaw - 90) * Math.PI) / 180;
             
+            // Görüş Açısı Çizgisi
             ctx.strokeStyle = color;
             ctx.lineWidth = 3;
             ctx.lineCap = "round";
@@ -322,16 +324,19 @@ HTML_RADAR_UI = """
             ctx.lineTo(x + Math.cos(lookRad) * 14, y + Math.sin(lookRad) * 14);
             ctx.stroke();
 
+            // Oyuncu Noktası
             ctx.fillStyle = color;
             ctx.beginPath();
             ctx.arc(x, y, 7, 0, 2 * Math.PI);
             ctx.fill();
+            
             ctx.strokeStyle = '#ffffff';
             ctx.lineWidth = 1.5;
             ctx.stroke();
 
+            // Oyuncu İsmi
             ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 10px Segoe UI';
+            ctx.font = 'bold 11px Segoe UI';
             ctx.textAlign = 'center';
             ctx.fillText(name, x, y - 12);
         }
@@ -346,7 +351,7 @@ HTML_RADAR_UI = """
                         <span class="player-money">$\${player.money}</span>
                     </div>
                     <div class="hp-bar-bg">
-                        <div class="hp-bar-fill" style="width: \${Math.max(0, player.health)}%; background-color: \${hpColor};"></div>
+                        <div class="hp-bar-fill" style="width: \${Math.max(0, player.health)}%; background-color: \-- hpColor};"></div>
                     </div>
                 </div>
             `;
@@ -357,11 +362,9 @@ HTML_RADAR_UI = """
                 const response = await fetch('/data?t=' + new Date().getTime());
                 const data = await response.json();
                 
-                // Eğer manuel seçim yoksa oyundan geleni kullan, varsa manuel seçimi zorunlu kıl
                 let activeMap = manualMapSelection || data.map_name || "de_mirage";
                 if (!MAP_METADATA[activeMap]) activeMap = "de_mirage";
                 
-                // Sayfa ilk açıldığında veya otomatik değişim sağlandığında tetiklenir
                 if (mapBg.style.backgroundImage.indexOf(activeMap) === -1) {
                     updateMapVisuals(activeMap);
                 }
@@ -377,7 +380,10 @@ HTML_RADAR_UI = """
 
                     if (p.health > 0) {
                         let coords = calculatePixelCoords(p.world_x, p.world_y, activeMap);
-                        drawPlayer(coords.x, coords.y, p.yaw, p.is_local, p.team === data.local_team, p.name);
+                        // Eğer harita sınırları dışındaysa bile ekranda kırpılmasını engelle
+                        if(coords.x >= 0 && coords.x <= canvas.width && coords.y >= 0 && coords.y <= canvas.height) {
+                            drawPlayer(coords.x, coords.y, p.yaw, p.is_local, p.team === data.local_team, p.name, p.health);
+                        }
                     }
                 });
 
@@ -385,7 +391,7 @@ HTML_RADAR_UI = """
                 document.getElementById('enemyTeamList').innerHTML = enemyTeamHTML;
 
             } catch (e) {}
-            setTimeout(tick, 15);
+            setTimeout(tick, 10);
         }
         tick();
     </script>
@@ -410,7 +416,7 @@ def main():
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    print("[+] Taktiksel Manuel Kontrol Radari Aktif. Link: http://localhost:8000")
+    print("[+] Gelişmiş Senkronizasyon Radarı Aktif: http://localhost:8000")
 
     while True:
         try:
@@ -426,7 +432,6 @@ def main():
             local_team = localPlayer.team
             view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
 
-            # Arka planda otomatik haritayı yine de deniyoruz
             map_name = "de_mirage"
             try:
                 game_lib = get_module_base(pid, "matchmaking.dll")
