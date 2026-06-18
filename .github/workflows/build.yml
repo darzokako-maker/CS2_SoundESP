@@ -17,19 +17,24 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-color: '3.11'
+        python-version: '3.11'
 
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller
+        pip install pyinstaller pyarmor
+
+    - name: Obfuscate Source Code
+      run: |
+        # main.py dosyasını obfuscate eder ve çıktıları 'dist' klasörüne koyar
+        pyarmor obfuscate main.py
+        # PyInstaller'ın şifrelenmiş kodu doğru paketlemesi için ana dizine taşıyoruz
+        copy dist\main.py .\main_obf.py
 
     - name: Build Hidden Admin EXE with Maps Embedded
       run: |
-        # --noconsole: Konsol ekranını tamamen gizler.
-        # --uac-admin: Hafıza okumak için gereken Yönetici İznini (Admin) otomatik ister.
-        # --add-data: Ana dizindeki tüm .png harita görsellerini exe'nin içine paketler.
-        pyinstaller --noconsole --onefile --uac-admin --add-data "*.png;." main.py
+        # Senin orijinal PyInstaller komutun, sadece girdi olarak şifrelenmiş dosya verildi
+        pyinstaller --noconsole --onefile --uac-admin --add-data "*.png;." --name="main" main_obf.py
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
