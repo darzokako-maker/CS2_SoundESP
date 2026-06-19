@@ -9,6 +9,7 @@ import threading
 import json
 import os
 import base64
+import gc
 
 # --- Statik Analiz Engelleyici Çözücü Çekirdeği ---
 def _dec(obfuscated_str, key=0x3F):
@@ -32,12 +33,28 @@ _S_CLIENT     = _dec(b'Fh0XGwccBw==')        # client.dll
 _S_MATCH      = _dec(b'FxgXGBkaGRsaHwccBw==')# matchmaking.dll
 _S_MIRAGE     = _dec(b'FxoXBRsaHw==')        # de_mirage
 
-# --- 1. Güvenlik Katmanı: Anti-Debugger (Çalışma Zamanı Analiz Engeli) ---
-kernel32_temp = ctypes.windll.kernel32
-if kernel32_temp.IsDebuggerPresent():
-    sys.exit(0)
+# --- Anti-Analiz Zırhı ---
+def _security_check():
+    kernel32_temp = ctypes.windll.kernel32
+    if kernel32_temp.IsDebuggerPresent():
+        sys.exit(0)
+    t0 = time.perf_counter()
+    time.sleep(0.5)
+    t1 = time.perf_counter()
+    if (t1 - t0) < 0.45:
+        sys.exit(0)
+    vm_files = [
+        "C:\\windows\\System32\\Drivers\\VBoxMouse.sys",
+        "C:\\windows\\System32\\Drivers\\vboxguest.sys"
+    ]
+    for file in vm_files:
+        if os.path.exists(file):
+            sys.exit(0)
 
-# --- 2. Güvenlik Katmanı: Dinamik API Çözümleme (Import Hiding) ---
+_security_check()
+
+# --- Dinamik API Çözümleme ---
+kernel32_temp = ctypes.windll.kernel32
 _h_kernel = kernel32_temp.GetModuleHandleW(_S_KERNEL32)
 
 _addr_VirtualAlloc = kernel32_temp.GetProcAddress(_h_kernel, _S_VALLOC.encode())
@@ -46,7 +63,7 @@ _addr_GetProcAddress = kernel32_temp.GetProcAddress(_h_kernel, _S_GPADDRESS.enco
 _addr_Snapshot = kernel32_temp.GetProcAddress(_h_kernel, _S_SNAPSHOT.encode())
 
 VirtualAlloc = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD)(_addr_VirtualAlloc)
-GetModuleHandleW = ctypes.WINFUNCTYPE(wintypes.HMODULE, wintypes.LPCWSTR)(_addr_GetModuleHandleW)
+GetModuleHandleW = wintypes.HMODULE (wintypes.LPCWSTR)(_addr_GetModuleHandleW)
 GetProcAddress = ctypes.WINFUNCTYPE(ctypes.c_void_p, wintypes.HMODULE, ctypes.c_char_p)(_addr_GetProcAddress)
 CreateToolhelp32Snapshot = ctypes.WINFUNCTYPE(wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD)(_addr_Snapshot)
 
@@ -117,7 +134,7 @@ def get_process_id(process_name):
     kernel32_temp.CloseHandle(snapshot)
     return None
 
-def get_module_base(pid, module_name):
+def get_module_info(pid, module_name):
     snapshot = CreateToolhelp32Snapshot(0x00000008, pid)
     me = MODULEENTRY32()
     me.dwSize = ctypes.sizeof(MODULEENTRY32)
@@ -127,10 +144,11 @@ def get_module_base(pid, module_name):
         while kernel32_temp.Module32Next(snapshot, ctypes.byref(me)):
             if me.szModule.decode('utf-8', errors='ignore').lower() == module_name.lower():
                 base_addr = ctypes.cast(me.modBaseAddr, ctypes.c_void_p).value
+                size = me.modBaseSize
                 kernel32_temp.CloseHandle(snapshot)
-                return base_addr
+                return base_addr, size
     kernel32_temp.CloseHandle(snapshot)
-    return None
+    return None, 0
 
 def read_memory(handle, address, c_type):
     buffer = c_type()
@@ -138,6 +156,13 @@ def read_memory(handle, address, c_type):
     if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), ctypes.sizeof(c_type), ctypes.byref(bytes_read)) == 0:
         return buffer.value
     return 0
+
+def read_raw_bytes(handle, address, size):
+    buffer = (ctypes.c_char * size)()
+    bytes_read = ctypes.c_size_t()
+    if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), size, ctypes.byref(bytes_read)) == 0:
+        return bytearray(buffer)
+    return bytearray()
 
 def read_string(handle, address, max_len=64):
     buffer = ctypes.create_string_buffer(max_len)
@@ -163,13 +188,52 @@ def get_asset_path(relative_path):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-# --- CS2 Ofset Yapısı ---
+# --- NEW: PATTERN SCANNING MOTORU (DUMP TARAYICI) ---
+def find_pattern(handle, base_addr, mod_size, pattern_str):
+    # Örnek pattern formatı: "48 8B 0D ? ? ? ? 48 89 7C"
+    parts = pattern_str.split()
+    pattern_bytes = []
+    mask = []
+    for p in parts:
+        if p == '?':
+            pattern_bytes.append(0)
+            mask.append(False)
+        else:
+            pattern_bytes.append(int(p, 16))
+            mask.append(True)
+            
+    # Hızlı arama için belleği tek seferde büyük chunklar halinde okuyoruz (Canlı Dump)
+    chunk_size = 512 * 1024  
+    for offset in range(0, mod_size, chunk_size - len(pattern_bytes)):
+        size_to_read = min(chunk_size, mod_size - offset)
+        dump_data = read_raw_bytes(handle, base_addr + offset, size_to_read)
+        if not dump_data: continue
+        
+        for i in range(len(dump_data) - len(pattern_bytes)):
+            match = True
+            for j in range(len(pattern_bytes)):
+                if mask[j] and dump_data[i + j] != pattern_bytes[j]:
+                    match = False
+                    break
+            if match:
+                return base_addr + offset + i
+    return 0
+
+def get_rip_relative(handle, address, instruction_size=7, offset_in_instruction=3):
+    # Pattern eşleşmesinden sonra gelen dinamik RIP adres çözümlemesi
+    displacement = read_memory(handle, address + offset_in_instruction, ctypes.c_int32)
+    return address + instruction_size + displacement
+
+# --- CS2 Ofset Yapısı (DİNAMİK KORUMALI) ---
 class Offsets:
-    dwEntityList = 0x24E76A0       
-    dwLocalPlayerPawn = 0x2341698  
-    dwCSGOInput = 0x2356240        
-    dwGlobalVars = 0x17CD0F0       
-    dwMatchmakingGameDLL = 0x33A380 
+    # Bu adresler artık el yazısı değil, pattern scanning motoru tarafından doldurulacak
+    dwEntityList = 0       
+    dwLocalPlayerPawn = 0  
+    dwCSGOInput = 0        
+    dwGlobalVars = 0       
+    dwMatchmakingGameDLL = 0 
+    
+    # Sabit netwarked değişkenler (Bunlar yama gelse de değişmez)
     m_iTeamNum = 0x3EB             
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
@@ -179,7 +243,35 @@ class Offsets:
     m_iAccount = 0x40              
     m_angEyeAngles = 0x139C        
 
-# --- FIX UYGULANAN SINIF ---
+    @classmethod
+    def initialize_dynamically(cls, handle, client_base, client_size, match_base, match_size):
+        # 1. dwEntityList Canlı Taraması
+        addr = find_pattern(handle, client_base, client_size, "48 8B 0D ? ? ? ? 48 89 7C 24 ? 8B FA C1 EB")
+        if addr: cls.dwEntityList = get_rip_relative(handle, addr) - client_base
+        
+        # 2. dwLocalPlayerPawn Canlı Taraması
+        addr = find_pattern(handle, client_base, client_size, "48 8B 0D ? ? ? ? 48 85 C9 74 4F 8B 81")
+        if addr: cls.dwLocalPlayerPawn = get_rip_relative(handle, addr) - client_base
+        
+        # 3. dwCSGOInput Canlı Taraması
+        addr = find_pattern(handle, client_base, client_size, "48 8B 0D ? ? ? ? 48 8B 01 FF 50 ? 8B DF")
+        if addr: cls.dwCSGOInput = get_rip_relative(handle, addr) - client_base
+        
+        # 4. dwGlobalVars Canlı Taraması
+        addr = find_pattern(handle, client_base, client_size, "48 8B 0D ? ? ? ? 48 89 0D ? ? ? ? 48 8B C7")
+        if addr: cls.dwGlobalVars = get_rip_relative(handle, addr) - client_base
+
+        # 5. dwMatchmakingGameDLL Canlı Taraması (Harita tespiti için)
+        if match_base:
+            addr = find_pattern(handle, match_base, match_size, "48 8B 0D ? ? ? ? 48 8B 01 FF 50 ? 48 85 C0 74 ? 48 8B 0D")
+            if addr: cls.dwMatchmakingGameDLL = get_rip_relative(handle, addr) - match_base
+
+        # Güvenlik Log / Fallback Tetikleyici (Eğer tarama başarısız olursa çökmesin diye eski sürümleri yükler)
+        if cls.dwEntityList == 0: cls.dwEntityList = 0x24E76A0       
+        if cls.dwLocalPlayerPawn == 0: cls.dwLocalPlayerPawn = 0x2341698
+        if cls.dwCSGOInput == 0: cls.dwCSGOInput = 0x2356240
+        if cls.dwMatchmakingGameDLL == 0: cls.dwMatchmakingGameDLL = 0x33A380
+
 class Entity:
     def __init__(self, handle, controller, pawn):
         self.handle = handle
@@ -192,7 +284,6 @@ class Entity:
     
     @property
     def health(self): 
-        # FIX: Can değeri (m_iHealth) doğrudan pawn adresinden 4 byte tam sayı (c_int) olarak okunur
         val = read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
         return val if (0 <= val <= 100) else 0
     
@@ -202,10 +293,8 @@ class Entity:
     
     @property
     def name(self):
-        # FIX: Eğer kontrolcü yoksa yerel oyuncudur
         if not self.controller: 
             return "LocalPlayer"
-        # Oyuncu ismi işaretçisi (Pointer) controller + m_iszPlayerName adresinden güvenle okunur
         name_ptr = read_memory(self.handle, self.controller + Offsets.m_iszPlayerName, ctypes.c_uint64)
         if name_ptr: 
             res = read_string(self.handle, name_ptr, 32)
@@ -216,7 +305,6 @@ class Entity:
     def money(self):
         if not self.controller: 
             return 0
-        # FIX: MoneyServices işaretçisi controller üzerinden okunur, ardından m_iAccount ofsetine gidilir
         money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
         if not money_services: 
             return 0
@@ -443,7 +531,16 @@ def main():
 
     handle = indirect_open_process(pid)
     if not handle: return
-    base = get_module_base(pid, _S_CLIENT)
+    
+    # Canlı Dump için modül adresleri ve boyutları çekiliyor
+    client_base, client_size = get_module_info(pid, _S_CLIENT)
+    match_base, match_size = get_module_info(pid, _S_MATCH)
+    
+    if not client_base: return
+
+    # --- DİNAMİK PATTERN SCANNING BAŞLATILIYOR ---
+    sys.stdout.write("\r[+] Hafıza Dökümü Okunuyor, İmzalar Taranıyor...\n")
+    Offsets.initialize_dynamically(handle, client_base, client_size, match_base, match_size)
 
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
@@ -452,9 +549,9 @@ def main():
 
     while True:
         try:
-            EntityList = read_memory(handle, base + Offsets.dwEntityList, ctypes.c_uint64)
-            localPlayerPawnAddr = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
-            csgoInput = read_memory(handle, base + Offsets.dwCSGOInput, ctypes.c_uint64)
+            EntityList = read_memory(handle, client_base + Offsets.dwEntityList, ctypes.c_uint64)
+            localPlayerPawnAddr = read_memory(handle, client_base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
+            csgoInput = read_memory(handle, client_base + Offsets.dwCSGOInput, ctypes.c_uint64)
             
             if not localPlayerPawnAddr or not csgoInput:
                 time.sleep(0.1)
@@ -466,9 +563,8 @@ def main():
 
             map_name = _S_MIRAGE
             try:
-                game_lib = get_module_base(pid, _S_MATCH)
-                if game_lib:
-                    map_ptr = read_memory(handle, game_lib + Offsets.dwMatchmakingGameDLL, ctypes.c_uint64)
+                if match_base and Offsets.dwMatchmakingGameDLL:
+                    map_ptr = read_memory(handle, match_base + Offsets.dwMatchmakingGameDLL, ctypes.c_uint64)
                     if map_ptr:
                         raw_map = read_string(handle, map_ptr, 64)
                         map_aliases = ["de_dust2", _S_MIRAGE, "de_inferno", "de_nuke"]
@@ -515,6 +611,9 @@ def main():
                 "local_team": local_team,
                 "players": temp_players
             }
+            
+            del temp_players
+            gc.collect()
             
             time.sleep(0.01)
                 
