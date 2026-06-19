@@ -35,7 +35,6 @@ _S_MIRAGE     = _dec(b'FxoXBRsaHw==')        # de_mirage
 # --- 1. Güvenlik Katmanı: Anti-Debugger (Çalışma Zamanı Analiz Engeli) ---
 kernel32_temp = ctypes.windll.kernel32
 if kernel32_temp.IsDebuggerPresent():
-    # Tersine mühendislik veya analiz aracı tespit edildiğinde sessizce çıkış yap
     sys.exit(0)
 
 # --- 2. Güvenlik Katmanı: Dinamik API Çözümleme (Import Hiding) ---
@@ -46,7 +45,6 @@ _addr_GetModuleHandleW = kernel32_temp.GetProcAddress(_h_kernel, _S_GMHANDLE.enc
 _addr_GetProcAddress = kernel32_temp.GetProcAddress(_h_kernel, _S_GPADDRESS.encode())
 _addr_Snapshot = kernel32_temp.GetProcAddress(_h_kernel, _S_SNAPSHOT.encode())
 
-# Fonksiyonların ctypes prototiplerini dinamik adreslere bağlama
 VirtualAlloc = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD)(_addr_VirtualAlloc)
 GetModuleHandleW = ctypes.WINFUNCTYPE(wintypes.HMODULE, wintypes.LPCWSTR)(_addr_GetModuleHandleW)
 GetProcAddress = ctypes.WINFUNCTYPE(ctypes.c_void_p, wintypes.HMODULE, ctypes.c_char_p)(_addr_GetProcAddress)
@@ -181,6 +179,7 @@ class Offsets:
     m_iAccount = 0x40              
     m_angEyeAngles = 0x139C        
 
+# --- FIX UYGULANAN SINIF ---
 class Entity:
     def __init__(self, handle, controller, pawn):
         self.handle = handle
@@ -188,25 +187,41 @@ class Entity:
         self.pawn = pawn
     
     @property
-    def team(self): return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
+    def team(self): 
+        return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
+    
     @property
-    def health(self): return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
+    def health(self): 
+        # FIX: Can değeri (m_iHealth) doğrudan pawn adresinden 4 byte tam sayı (c_int) olarak okunur
+        val = read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
+        return val if (0 <= val <= 100) else 0
+    
     @property
-    def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
+    def position(self): 
+        return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
     
     @property
     def name(self):
-        if not self.controller: return "LocalPlayer"
+        # FIX: Eğer kontrolcü yoksa yerel oyuncudur
+        if not self.controller: 
+            return "LocalPlayer"
+        # Oyuncu ismi işaretçisi (Pointer) controller + m_iszPlayerName adresinden güvenle okunur
         name_ptr = read_memory(self.handle, self.controller + Offsets.m_iszPlayerName, ctypes.c_uint64)
-        if name_ptr: return read_string(self.handle, name_ptr, 32)
+        if name_ptr: 
+            res = read_string(self.handle, name_ptr, 32)
+            return res if res else "Player"
         return "Player"
         
     @property
     def money(self):
-        if not self.controller: return 0
+        if not self.controller: 
+            return 0
+        # FIX: MoneyServices işaretçisi controller üzerinden okunur, ardından m_iAccount ofsetine gidilir
         money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
-        if not money_services: return 0
-        return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
+        if not money_services: 
+            return 0
+        val = read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
+        return val if (0 <= val <= 16000) else 0
 
 radar_data = {"map_name": _S_MIRAGE, "yaw": 0, "local_team": 0, "players": []}
 
