@@ -8,64 +8,21 @@ import socketserver
 import threading
 import json
 import os
-import base64
-import gc
 
-# --- Statik Analiz Engelleyici Çözücü Çekirdeği ---
-def _dec(obfuscated_str, key=0x3F):
-    try:
-        decoded_bytes = base64.b64decode(obfuscated_str)
-        return "".join(chr(b ^ key) for b in decoded_bytes)
-    except:
-        return ""
+# --- Windows Hafıza Okuma API Yapılandırması ---
+kernel32 = ctypes.windll.kernel32
 
-# Dinamik Olarak Çözülecek Kritik API ve Sistem Kelimeleri
-_S_KERNEL32   = _dec(b'HxwSDB0YDAwc')       # kernel32.dll
-_S_NTDLL      = _dec(b'GxoLDBcc')           # ntdll.dll
-_S_VALLOC     = _dec(b'IhwXHB0YDAwbDBMc')   # VirtualAlloc
-_S_GMHANDLE   = _dec(b'BhccDQscGgwcGw0YDQ==')# GetModuleHandleW
-_S_GPADDRESS  = _dec(b'BhccBw0YDQscHg0YDQ==')# GetProcAddress
-_S_SNAPSHOT   = _dec(b'AxsaGRwYDBwZDxsKBwscGQwc') # CreateToolhelp32Snapshot
-_S_RVM        = _dec(b'GxoLDBccHw0XBRscHA==') # NtReadVirtualMemory
-_S_OP         = _dec(b'GxoLDBccGQcbGg==')    # NtOpenProcess
-_S_CS2        = _dec(b'FxoXGg0=')            # cs2.exe
-_S_CLIENT     = _dec(b'Fh0XGwccBw==')        # client.dll
-_S_MATCH      = _dec(b'FxgXGBkaGRsaHwccBw==')# matchmaking.dll
-_S_MIRAGE     = _dec(b'FxoXBRsaHw==')        # de_mirage
+kernel32.VirtualAlloc.restype = ctypes.c_void_p
+kernel32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
 
-# --- Anti-Analiz Zırhı ---
-def _security_check():
-    kernel32_temp = ctypes.windll.kernel32
-    if kernel32_temp.IsDebuggerPresent():
-        sys.exit(0)
-    t0 = time.perf_counter()
-    time.sleep(0.5)
-    t1 = time.perf_counter()
-    if (t1 - t0) < 0.45:
-        sys.exit(0)
-    vm_files = [
-        "C:\\windows\\System32\\Drivers\\VBoxMouse.sys",
-        "C:\\windows\\System32\\Drivers\\vboxguest.sys"
-    ]
-    for file in vm_files:
-        if os.path.exists(file):
-            sys.exit(0)
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 
-_security_check()
+kernel32.GetProcAddress.restype = ctypes.c_void_p
+kernel32.GetProcAddress.argtypes = [wintypes.HMODULE, ctypes.c_char_p]
 
-# --- Dinamik API Çözümleme ---
-kernel32_temp = ctypes.windll.kernel32
-_h_kernel = kernel32_temp.GetModuleHandleW(_S_KERNEL32)
-
-_addr_VirtualAlloc = kernel32_temp.GetProcAddress(_h_kernel, _S_VALLOC.encode())
-_addr_GetModuleHandleW = kernel32_temp.GetProcAddress(_h_kernel, _S_GMHANDLE.encode())
-_addr_GetProcAddress = kernel32_temp.GetProcAddress(_h_kernel, _S_GPADDRESS.encode())
-_addr_Snapshot = kernel32_temp.GetProcAddress(_h_kernel, _S_SNAPSHOT.encode())
-
-VirtualAlloc = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD)(_addr_VirtualAlloc)
-GetModuleHandleW = wintypes.HMODULE (wintypes.LPCWSTR)(_addr_GetModuleHandleW)
-GetProcAddress = ctypes.WINFUNCTYPE(ctypes.c_void_p, wintypes.HMODULE, ctypes.c_char_p)(_addr_GetProcAddress)
-CreateToolhelp32Snapshot = ctypes.WINFUNCTYPE(wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD)(_addr_Snapshot)
+kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 
 class CLIENT_ID(ctypes.Structure):
     _fields_ = [("UniqueProcess", wintypes.HANDLE), ("UniqueThread", wintypes.HANDLE)]
@@ -92,8 +49,8 @@ class MODULEENTRY32(ctypes.Structure):
     ]
 
 def _get_ntdll_syscall_address():
-    h_ntdll = GetModuleHandleW(_S_NTDLL)
-    nt_read_addr = GetProcAddress(h_ntdll, _S_RVM.encode('utf-8'))
+    h_ntdll = kernel32.GetModuleHandleW("ntdll.dll")
+    nt_read_addr = kernel32.GetProcAddress(h_ntdll, b"NtReadVirtualMemory")
     if not nt_read_addr: return 0
     for offset in range(0, 100):
         ptr = nt_read_addr + offset
@@ -104,11 +61,11 @@ _LEGAL_SYSCALL_ADDR = _get_ntdll_syscall_address()
 _op_shellcode = b"\x4C\x8B\xD1\xB8\x26\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 _rvm_shellcode = b"\x4C\x8B\xD1\xB8\x3F\x00\x00\x00\x49\xBB" + ctypes.c_uint64(_LEGAL_SYSCALL_ADDR).value.to_bytes(8, 'little') + b"\x41\xFF\xE3\xC3"
 
-buf_op = VirtualAlloc(None, len(_op_shellcode), 0x1000 | 0x2000, 0x40)
+buf_op = kernel32.VirtualAlloc(None, len(_op_shellcode), 0x1000 | 0x2000, 0x40)
 ctypes.memmove(buf_op, _op_shellcode, len(_op_shellcode))
 _IndirectNtOpenProcess = ctypes.WINFUNCTYPE(wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, ctypes.POINTER(OBJECT_ATTRIBUTES), ctypes.POINTER(CLIENT_ID))(buf_op)
 
-buf_rvm = VirtualAlloc(None, len(_rvm_shellcode), 0x1000 | 0x2000, 0x40)
+buf_rvm = kernel32.VirtualAlloc(None, len(_rvm_shellcode), 0x1000 | 0x2000, 0x40)
 ctypes.memmove(buf_rvm, _rvm_shellcode, len(_rvm_shellcode))
 _IndirectNtReadVirtualMemory = ctypes.WINFUNCTYPE(wintypes.DWORD, wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t))(buf_rvm)
 
@@ -121,34 +78,33 @@ def indirect_open_process(pid):
     return None
 
 def get_process_id(process_name):
-    snapshot = CreateToolhelp32Snapshot(0x00000002, 0)
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
     pe = PROCESSENTRY32()
     pe.dwSize = ctypes.sizeof(PROCESSENTRY32)
-    kernel32_temp.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
-    kernel32_temp.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
-    if kernel32_temp.Process32First(snapshot, ctypes.byref(pe)):
-        while kernel32_temp.Process32Next(snapshot, ctypes.byref(pe)):
+    kernel32.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
+    kernel32.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
+    if kernel32.Process32First(snapshot, ctypes.byref(pe)):
+        while kernel32.Process32Next(snapshot, ctypes.byref(pe)):
             if pe.szExeFile.decode('utf-8', errors='ignore').lower() == process_name.lower():
-                kernel32_temp.CloseHandle(snapshot)
+                kernel32.CloseHandle(snapshot)
                 return pe.th32ProcessID
-    kernel32_temp.CloseHandle(snapshot)
+    kernel32.CloseHandle(snapshot)
     return None
 
-def get_module_info(pid, module_name):
-    snapshot = CreateToolhelp32Snapshot(0x00000008, pid)
+def get_module_base(pid, module_name):
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000008, pid)
     me = MODULEENTRY32()
     me.dwSize = ctypes.sizeof(MODULEENTRY32)
-    kernel32_temp.Module32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
-    kernel32_temp.Module32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
-    if kernel32_temp.Module32First(snapshot, ctypes.byref(me)):
-        while kernel32_temp.Module32Next(snapshot, ctypes.byref(me)):
+    kernel32.Module32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
+    kernel32.Module32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(MODULEENTRY32)]
+    if kernel32.Module32First(snapshot, ctypes.byref(me)):
+        while kernel32.Module32Next(snapshot, ctypes.byref(me)):
             if me.szModule.decode('utf-8', errors='ignore').lower() == module_name.lower():
                 base_addr = ctypes.cast(me.modBaseAddr, ctypes.c_void_p).value
-                size = me.modBaseSize
-                kernel32_temp.CloseHandle(snapshot)
-                return base_addr, size
-    kernel32_temp.CloseHandle(snapshot)
-    return None, 0
+                kernel32.CloseHandle(snapshot)
+                return base_addr
+    kernel32.CloseHandle(snapshot)
+    return None
 
 def read_memory(handle, address, c_type):
     buffer = c_type()
@@ -157,13 +113,6 @@ def read_memory(handle, address, c_type):
         return buffer.value
     return 0
 
-def read_raw_bytes(handle, address, size):
-    buffer = (ctypes.c_char * size)()
-    bytes_read = ctypes.c_size_t()
-    if _IndirectNtReadVirtualMemory(handle, ctypes.c_void_p(address), ctypes.byref(buffer), size, ctypes.byref(bytes_read)) == 0:
-        return bytearray(buffer)
-    return bytearray()
-
 def read_string(handle, address, max_len=64):
     buffer = ctypes.create_string_buffer(max_len)
     bytes_read = ctypes.c_size_t()
@@ -171,8 +120,8 @@ def read_string(handle, address, max_len=64):
         try:
             return buffer.value.decode('utf-8', errors='ignore').split('\x00')[0].strip()
         except:
-            return _S_MIRAGE
-    return _S_MIRAGE
+            return "de_mirage"
+    return "de_mirage"
 
 def read_vec3(handle, address):
     class Vec3(ctypes.Structure):
@@ -188,52 +137,13 @@ def get_asset_path(relative_path):
         return os.path.join(sys._MEIPASS, relative_path)
     return os.path.join(os.path.abspath("."), relative_path)
 
-# --- NEW: PATTERN SCANNING MOTORU (DUMP TARAYICI) ---
-def find_pattern(handle, base_addr, mod_size, pattern_str):
-    # Örnek pattern formatı: "48 8B 0D ? ? ? ? 48 89 7C"
-    parts = pattern_str.split()
-    pattern_bytes = []
-    mask = []
-    for p in parts:
-        if p == '?':
-            pattern_bytes.append(0)
-            mask.append(False)
-        else:
-            pattern_bytes.append(int(p, 16))
-            mask.append(True)
-            
-    # Hızlı arama için belleği tek seferde büyük chunklar halinde okuyoruz (Canlı Dump)
-    chunk_size = 512 * 1024  
-    for offset in range(0, mod_size, chunk_size - len(pattern_bytes)):
-        size_to_read = min(chunk_size, mod_size - offset)
-        dump_data = read_raw_bytes(handle, base_addr + offset, size_to_read)
-        if not dump_data: continue
-        
-        for i in range(len(dump_data) - len(pattern_bytes)):
-            match = True
-            for j in range(len(pattern_bytes)):
-                if mask[j] and dump_data[i + j] != pattern_bytes[j]:
-                    match = False
-                    break
-            if match:
-                return base_addr + offset + i
-    return 0
-
-def get_rip_relative(handle, address, instruction_size=7, offset_in_instruction=3):
-    # Pattern eşleşmesinden sonra gelen dinamik RIP adres çözümlemesi
-    displacement = read_memory(handle, address + offset_in_instruction, ctypes.c_int32)
-    return address + instruction_size + displacement
-
-# --- CS2 Ofset Yapısı (DİNAMİK KORUMALI) ---
+# --- CS2 Ofset Yapısı ---
 class Offsets:
-    # Bu adresler artık el yazısı değil, pattern scanning motoru tarafından doldurulacak
-    dwEntityList = 0       
-    dwLocalPlayerPawn = 0  
-    dwCSGOInput = 0        
-    dwGlobalVars = 0       
-    dwMatchmakingGameDLL = 0 
-    
-    # Sabit netwarked değişkenler (Bunlar yama gelse de değişmez)
+    dwEntityList = 0x24E76A0       
+    dwLocalPlayerPawn = 0x2341698  
+    dwCSGOInput = 0x2356240        
+    dwGlobalVars = 0x17CD0F0       
+    dwMatchmakingGameDLL = 0x33A380 
     m_iTeamNum = 0x3EB             
     m_iHealth = 0x34C              
     m_vOldOrigin = 0x1390          
@@ -243,35 +153,6 @@ class Offsets:
     m_iAccount = 0x40              
     m_angEyeAngles = 0x139C        
 
-    @classmethod
-    def initialize_dynamically(cls, handle, client_base, client_size, match_base, match_size):
-        # 1. dwEntityList Canlı Taraması
-        addr = find_pattern(handle, client_base, client_size, "48 8B 0D ? ? ? ? 48 89 7C 24 ? 8B FA C1 EB")
-        if addr: cls.dwEntityList = get_rip_relative(handle, addr) - client_base
-        
-        # 2. dwLocalPlayerPawn Canlı Taraması
-        addr = find_pattern(handle, client_base, client_size, "48 8B 0D ? ? ? ? 48 85 C9 74 4F 8B 81")
-        if addr: cls.dwLocalPlayerPawn = get_rip_relative(handle, addr) - client_base
-        
-        # 3. dwCSGOInput Canlı Taraması
-        addr = find_pattern(handle, client_base, client_size, "48 8B 0D ? ? ? ? 48 8B 01 FF 50 ? 8B DF")
-        if addr: cls.dwCSGOInput = get_rip_relative(handle, addr) - client_base
-        
-        # 4. dwGlobalVars Canlı Taraması
-        addr = find_pattern(handle, client_base, client_size, "48 8B 0D ? ? ? ? 48 89 0D ? ? ? ? 48 8B C7")
-        if addr: cls.dwGlobalVars = get_rip_relative(handle, addr) - client_base
-
-        # 5. dwMatchmakingGameDLL Canlı Taraması (Harita tespiti için)
-        if match_base:
-            addr = find_pattern(handle, match_base, match_size, "48 8B 0D ? ? ? ? 48 8B 01 FF 50 ? 48 85 C0 74 ? 48 8B 0D")
-            if addr: cls.dwMatchmakingGameDLL = get_rip_relative(handle, addr) - match_base
-
-        # Güvenlik Log / Fallback Tetikleyici (Eğer tarama başarısız olursa çökmesin diye eski sürümleri yükler)
-        if cls.dwEntityList == 0: cls.dwEntityList = 0x24E76A0       
-        if cls.dwLocalPlayerPawn == 0: cls.dwLocalPlayerPawn = 0x2341698
-        if cls.dwCSGOInput == 0: cls.dwCSGOInput = 0x2356240
-        if cls.dwMatchmakingGameDLL == 0: cls.dwMatchmakingGameDLL = 0x33A380
-
 class Entity:
     def __init__(self, handle, controller, pawn):
         self.handle = handle
@@ -279,39 +160,27 @@ class Entity:
         self.pawn = pawn
     
     @property
-    def team(self): 
-        return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
-    
+    def team(self): return read_memory(self.handle, self.pawn + Offsets.m_iTeamNum, ctypes.c_int)
     @property
-    def health(self): 
-        val = read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
-        return val if (0 <= val <= 100) else 0
-    
+    def health(self): return read_memory(self.handle, self.pawn + Offsets.m_iHealth, ctypes.c_int)
     @property
-    def position(self): 
-        return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
+    def position(self): return read_vec3(self.handle, self.pawn + Offsets.m_vOldOrigin)
     
     @property
     def name(self):
-        if not self.controller: 
-            return "LocalPlayer"
+        if not self.controller: return "LocalPlayer"
         name_ptr = read_memory(self.handle, self.controller + Offsets.m_iszPlayerName, ctypes.c_uint64)
-        if name_ptr: 
-            res = read_string(self.handle, name_ptr, 32)
-            return res if res else "Player"
+        if name_ptr: return read_string(self.handle, name_ptr, 32)
         return "Player"
         
     @property
     def money(self):
-        if not self.controller: 
-            return 0
+        if not self.controller: return 0
         money_services = read_memory(self.handle, self.controller + Offsets.m_pInGameMoneyServices, ctypes.c_uint64)
-        if not money_services: 
-            return 0
-        val = read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
-        return val if (0 <= val <= 16000) else 0
+        if not money_services: return 0
+        return read_memory(self.handle, money_services + Offsets.m_iAccount, ctypes.c_int)
 
-radar_data = {"map_name": _S_MIRAGE, "yaw": 0, "local_team": 0, "players": []}
+radar_data = {"map_name": "de_mirage", "yaw": 0, "local_team": 0, "players": []}
 
 class RadarWebHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args): return
@@ -346,6 +215,7 @@ def run_web_server():
     with socketserver.TCPServer(("0.0.0.0", PORT), RadarWebHandler) as httpd:
         httpd.serve_forever()
 
+# --- TEK GÖRSEL UYUMLU STABİL RADAR ARAYÜZÜ ---
 HTML_RADAR_UI = """
 <!DOCTYPE html>
 <html>
@@ -407,11 +277,12 @@ HTML_RADAR_UI = """
         
         let manualMapSelection = null;
 
+        // Tek parça harita kalibrasyon verileri
         const MAP_METADATA = {
-            "de_dust2":   { pos_x: -2476, pos_y: 3239,  scale: 4.4,  offset_x: 0,   offset_y: 0 },
-            "de_mirage":  { pos_x: -3230, pos_y: 1713,  scale: 5.0,  offset_x: 0,   offset_y: 0 },
-            "de_inferno": { pos_x: -2087, pos_y: 3870,  scale: 4.9,  offset_x: 0,   offset_y: 0 },
-            "de_nuke":    { pos_x: -3450, pos_y: -485,  scale: 7.0,  offset_x: -10, offset_y: -5 }
+            "de_dust2":   { pos_x: -2476, pos_y: 3239,  scale: 4.4,  offset_x: 0,  offset_y: 0 },
+            "de_mirage":  { pos_x: -3230, pos_y: 1713,  scale: 5.0,  offset_x: 0,  offset_y: 0 },
+            "de_inferno": { pos_x: -2087, pos_y: 3870,  scale: 4.9,  offset_x: 0,  offset_y: 0 },
+            "de_nuke":    { pos_x: -3450, pos_y: -485,  scale: 7.0,  offset_x: 0,  offset_y: 0 }
         };
 
         function selectMap(mapName) {
@@ -430,36 +301,43 @@ HTML_RADAR_UI = """
             const meta = MAP_METADATA[mapName] || MAP_METADATA["de_mirage"];
             let pixelX = (worldX - meta.pos_x) / meta.scale;
             let pixelY = (meta.pos_y - worldY) / meta.scale;
+            
             let finalX = (pixelX / 1024) * canvas.width + meta.offset_x;
             let finalY = (pixelY / 1024) * canvas.height + meta.offset_y;
             return { x: finalX, y: finalY };
         }
 
-        function drawPlayer(x, y, yaw, isLocal, isTeammate, name, health) {
+        function drawPlayer(x, y, yaw, isLocal, isTeammate, name, health, isDifferentLevel) {
             const color = isLocal ? '#00ffcc' : (isTeammate ? '#3498db' : '#e74c3c');
             let lookRad = ((yaw - 90) * Math.PI) / 180;
             
+            ctx.globalAlpha = isDifferentLevel ? 0.35 : 1.0;
+
+            // Görüş Açısı Çizgisi
             ctx.strokeStyle = color;
-            ctx.lineWidth = 3;
-            ctx.lineCap = "round";
+            ctx.lineWidth = isDifferentLevel ? 1.5 : 3;
             ctx.beginPath();
             ctx.moveTo(x, y);
-            ctx.lineTo(x + Math.cos(lookRad) * 14, y + Math.sin(lookRad) * 14);
+            ctx.lineTo(x + Math.cos(lookRad) * 12, y + Math.sin(lookRad) * 12);
             ctx.stroke();
 
+            // Oyuncu İkonu
             ctx.fillStyle = color;
             ctx.beginPath();
-            ctx.arc(x, y, 7, 0, 2 * Math.PI);
+            ctx.arc(x, y, isDifferentLevel ? 5 : 7, 0, 2 * Math.PI);
             ctx.fill();
             
             ctx.strokeStyle = '#ffffff';
-            ctx.lineWidth = 1.5;
+            ctx.lineWidth = 1;
             ctx.stroke();
 
+            // İsim
             ctx.fillStyle = '#ffffff';
-            ctx.font = 'bold 11px Segoe UI';
+            ctx.font = isDifferentLevel ? '9px Segoe UI' : 'bold 11px Segoe UI';
             ctx.textAlign = 'center';
             ctx.fillText(name, x, y - 12);
+            
+            ctx.globalAlpha = 1.0;
         }
 
         function createPlayerCard(player) {
@@ -484,8 +362,7 @@ HTML_RADAR_UI = """
                 const data = await response.json();
                 
                 let activeMap = manualMapSelection || data.map_name || "de_mirage";
-                if (!MAP_METADATA[activeMap]) activeMap = "de_mirage";
-                
+
                 if (mapBg.style.backgroundImage.indexOf(activeMap) === -1) {
                     updateMapVisuals(activeMap);
                 }
@@ -495,14 +372,33 @@ HTML_RADAR_UI = """
                 let myTeamHTML = "";
                 let enemyTeamHTML = "";
                 
+                // Nuke için anlık dikey katman takibi (Z ekseni sınırı -480)
+                let isLocalInLower = false;
+                if (data.map_name === "de_nuke") {
+                    const localPlayer = data.players.find(p => p.is_local);
+                    if (localPlayer && localPlayer.world_z < -480) {
+                        isLocalInLower = true;
+                    }
+                }
+
                 data.players.forEach(p => {
                     if (p.team === data.local_team) myTeamHTML += createPlayerCard(p);
                     else enemyTeamHTML += createPlayerCard(p);
 
                     if (p.health > 0) {
                         let coords = calculatePixelCoords(p.world_x, p.world_y, activeMap);
+                        
+                        let isDifferentLevel = false;
+                        if (data.map_name === "de_nuke") {
+                            let playerInLower = p.world_z < -480;
+                            // Eğer sen alttaysan ve adam üstteyse (ya da tam tersi) opaklığı düşür
+                            if ((isLocalInLower && !playerInLower) || (!isLocalInLower && playerInLower)) {
+                                isDifferentLevel = true;
+                            }
+                        }
+
                         if(coords.x >= 0 && coords.x <= canvas.width && coords.y >= 0 && coords.y <= canvas.height) {
-                            drawPlayer(coords.x, coords.y, p.yaw, p.is_local, p.team === data.local_team, p.name, p.health);
+                            drawPlayer(coords.x, coords.y, p.yaw, p.is_local, p.team === data.local_team, p.name, p.health, isDifferentLevel);
                         }
                     }
                 });
@@ -511,7 +407,7 @@ HTML_RADAR_UI = """
                 document.getElementById('enemyTeamList').innerHTML = enemyTeamHTML;
 
             } catch (e) {}
-            setTimeout(tick, 10);
+            setTimeout(tick, 15);
         }
         tick();
     </script>
@@ -523,35 +419,26 @@ def main():
     global radar_data
     pid = None
     while pid is None:
-        pid = get_process_id(_S_CS2)
+        pid = get_process_id("cs2.exe")
         if pid is None:
-            sys.stdout.write(f"\r[ Sınır Koruması ] {_S_CS2} bekleniyor... \x1b[K")
+            sys.stdout.write("\r[ Waiting ] cs2.exe bekleniyor... \x1b[K")
             sys.stdout.flush()
             time.sleep(1)
 
     handle = indirect_open_process(pid)
     if not handle: return
-    
-    # Canlı Dump için modül adresleri ve boyutları çekiliyor
-    client_base, client_size = get_module_info(pid, _S_CLIENT)
-    match_base, match_size = get_module_info(pid, _S_MATCH)
-    
-    if not client_base: return
-
-    # --- DİNAMİK PATTERN SCANNING BAŞLATILIYOR ---
-    sys.stdout.write("\r[+] Hafıza Dökümü Okunuyor, İmzalar Taranıyor...\n")
-    Offsets.initialize_dynamically(handle, client_base, client_size, match_base, match_size)
+    base = get_module_base(pid, "client.dll")
 
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
-    print("[+] Çekirdek Yapılandırma Aktif: http://localhost:8000")
+    print("[+] Gelişmiş Senkronizasyon Radarı Aktif: http://localhost:8000")
 
     while True:
         try:
-            EntityList = read_memory(handle, client_base + Offsets.dwEntityList, ctypes.c_uint64)
-            localPlayerPawnAddr = read_memory(handle, client_base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
-            csgoInput = read_memory(handle, client_base + Offsets.dwCSGOInput, ctypes.c_uint64)
+            EntityList = read_memory(handle, base + Offsets.dwEntityList, ctypes.c_uint64)
+            localPlayerPawnAddr = read_memory(handle, base + Offsets.dwLocalPlayerPawn, ctypes.c_uint64)
+            csgoInput = read_memory(handle, base + Offsets.dwCSGOInput, ctypes.c_uint64)
             
             if not localPlayerPawnAddr or not csgoInput:
                 time.sleep(0.1)
@@ -561,19 +448,20 @@ def main():
             local_team = localPlayer.team
             view_angles_y = read_memory(handle, csgoInput + 0x44, ctypes.c_float)
 
-            map_name = _S_MIRAGE
+            map_name = "de_mirage"
             try:
-                if match_base and Offsets.dwMatchmakingGameDLL:
-                    map_ptr = read_memory(handle, match_base + Offsets.dwMatchmakingGameDLL, ctypes.c_uint64)
+                game_lib = get_module_base(pid, "matchmaking.dll")
+                if game_lib:
+                    map_ptr = read_memory(handle, game_lib + Offsets.dwMatchmakingGameDLL, ctypes.c_uint64)
                     if map_ptr:
                         raw_map = read_string(handle, map_ptr, 64)
-                        map_aliases = ["de_dust2", _S_MIRAGE, "de_inferno", "de_nuke"]
+                        map_aliases = ["de_dust2", "de_mirage", "de_inferno", "de_nuke"]
                         for m in map_aliases:
                             if m in raw_map:
                                 map_name = m
                                 break
             except:
-                map_name = _S_MIRAGE
+                map_name = "de_mirage"
 
             temp_players = []
 
@@ -602,7 +490,8 @@ def main():
                     "is_local": is_local,
                     "yaw": player_yaw,
                     "world_x": player_pos["x"],
-                    "world_y": player_pos["y"]
+                    "world_y": player_pos["y"],
+                    "world_z": player_pos["z"]
                 })
 
             radar_data = {
@@ -611,9 +500,6 @@ def main():
                 "local_team": local_team,
                 "players": temp_players
             }
-            
-            del temp_players
-            gc.collect()
             
             time.sleep(0.01)
                 
